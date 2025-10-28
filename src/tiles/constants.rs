@@ -33,5 +33,5 @@ pub const MAX_TILE_TYPES: usize = u16::MAX as usize + 1;
 /// Radius of chunks to load around the camera (7x7 = 49 chunks)
 pub const CHUNK_LOAD_RADIUS: i32 = 3; // 3 chunks in each direction = 7x7 grid
 
-/// Radius of chunks to keep loaded (9x9 = 81 chunks buffer to prevent thrashing)
-pub const CHUNK_UNLOAD_RADIUS: i32 = 4; // 4 chunks in each direction = 9x9 grid
+/// Radius of chunks to keep loaded (11x11 = 121 chunks, +2 above load radius to prevent thrashing)
+pub const CHUNK_UNLOAD_RADIUS: i32 = 5; // 5 chunks in each direction = 11x11 grid

@@ -65,6 +65,15 @@ Currently all game logic resides in `src/main.rs`. As the project grows, conside
    - Guardian button has expandable submenu showing 5 guardian variants
    - UI sprites require vertical offset constants (see `*_SPRITE_OFFSET` constants)
 
+4. **Chunk Loading System** (`world/loader.rs`)
+   - Dynamically loads/unloads terrain chunks based on camera position
+   - Load radius: 3 chunks (7×7 grid = 49 chunks) defined in `CHUNK_LOAD_RADIUS`
+   - Unload radius: 5 chunks (11×11 grid = 121 chunks) defined in `CHUNK_UNLOAD_RADIUS`
+   - **Hysteresis design**: Unload radius is +2 above load radius to prevent chunk thrashing
+   - Prevents repeated load/unload cycles when camera moves back and forth near chunk boundaries
+   - Chunks are serialized to disk when unloaded if marked dirty
+   - Constants defined in `src/tiles/constants.rs`
+
 ### Entity Organization
 
 **Marker Components**: Used to identify entity types

@@ -1,4 +1,5 @@
 use bevy::{
+    input::mouse::MouseWheel,
     prelude::*,
     sprite_render::{TileData, TilemapChunk, TilemapChunkTileData},
 };
@@ -13,6 +14,11 @@ const HUMAN_SPRITE_OFFSET: f32 = 1.0;
 const FOREST_GUARDIAN_SPRITE_OFFSET: f32 = 10.0;
 const SNAIL_SPRITE_OFFSET: f32 = 10.0;
 const SNAIL_SPRITE_OFFSET_X: f32 = 10.0;
+
+// Camera zoom configuration
+const ZOOM_MIN: f32 = 0.5;  // Max zoom in (smaller = more zoomed in)
+const ZOOM_MAX: f32 = 3.0;  // Max zoom out (larger = more zoomed out)
+const ZOOM_SPEED: f32 = 0.1; // Zoom change per input
 
 // Animation components
 #[derive(Component)]
@@ -49,6 +55,7 @@ fn main() {
                 update_tileset_image,
                 animate_sprite,
                 move_camera,
+                zoom_camera,
                 loader::update_camera_chunk,
                 loader::load_chunks_around_camera.after(loader::update_camera_chunk),
                 loader::unload_distant_chunks.after(loader::load_chunks_around_camera),
@@ -195,6 +202,37 @@ fn move_camera(
         }
         if keyboard.pressed(KeyCode::KeyD) || keyboard.pressed(KeyCode::ArrowRight) {
             transform.translation.x += speed * delta;
+        }
+    }
+}
+
+/// Camera zoom system - supports scroll wheel and keyboard (- and = keys)
+fn zoom_camera(
+    mut scroll_events: MessageReader<MouseWheel>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut camera_query: Query<&mut Projection, With<Camera2d>>,
+) {
+    if let Ok(mut projection) = camera_query.single_mut() {
+        let mut zoom_delta = 0.0;
+
+        // Handle scroll wheel input
+        for event in scroll_events.read() {
+            zoom_delta -= event.y * ZOOM_SPEED;
+        }
+
+        // Handle keyboard input (- to zoom out, = to zoom in)
+        if keyboard.just_pressed(KeyCode::Minus) {
+            zoom_delta += ZOOM_SPEED;
+        }
+        if keyboard.just_pressed(KeyCode::Equal) {
+            zoom_delta -= ZOOM_SPEED;
+        }
+
+        // Apply zoom delta and clamp to bounds
+        if zoom_delta != 0.0 {
+            if let Projection::Orthographic(ref mut ortho) = projection.as_mut() {
+                ortho.scale = (ortho.scale + zoom_delta).clamp(ZOOM_MIN, ZOOM_MAX);
+            }
         }
     }
 }
