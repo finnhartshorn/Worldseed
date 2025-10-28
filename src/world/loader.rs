@@ -29,6 +29,8 @@ pub fn load_chunks_around_camera(
     mut commands: Commands,
     mut world: ResMut<WorldManager>,
     asset_server: Res<AssetServer>,
+    camera_query: Query<(&Transform, &Projection), With<Camera2d>>,
+    window_query: Query<&Window>,
 ) {
     let Some(camera_chunk) = world.camera_chunk else {
         return;
@@ -96,7 +98,8 @@ pub fn load_chunks_around_camera(
 
     // Print chunk grid after loading
     if has_loaded_chunks {
-        print_chunk_grid(&world, camera_chunk);
+        let visible_chunks = calculate_visible_chunks(&camera_query, &window_query);
+        print_chunk_grid(&world, camera_chunk, visible_chunks);
     }
 }
 
@@ -105,6 +108,8 @@ pub fn unload_distant_chunks(
     mut commands: Commands,
     mut world: ResMut<WorldManager>,
     chunk_query: Query<(Entity, &Chunk)>,
+    camera_query: Query<(&Transform, &Projection), With<Camera2d>>,
+    window_query: Query<&Window>,
 ) {
     let Some(camera_chunk) = world.camera_chunk else {
         return;
@@ -150,7 +155,8 @@ pub fn unload_distant_chunks(
 
     // Print chunk grid after unloading
     if has_unloaded_chunks {
-        print_chunk_grid(&world, camera_chunk);
+        let visible_chunks = calculate_visible_chunks(&camera_query, &window_query);
+        print_chunk_grid(&world, camera_chunk, visible_chunks);
     }
 }
 
@@ -188,8 +194,57 @@ pub fn log_world_stats(world: Res<WorldManager>) {
     debug!("World stats: {}", stats);
 }
 
+/// Calculate which chunks are visible in the camera viewport
+fn calculate_visible_chunks(
+    camera_query: &Query<(&Transform, &Projection), With<Camera2d>>,
+    window_query: &Query<&Window>,
+) -> HashSet<ChunkPos> {
+    let mut visible_chunks = HashSet::new();
+
+    // Get camera data
+    let Ok((camera_transform, projection)) = camera_query.single() else {
+        return visible_chunks;
+    };
+
+    // Get window size
+    let Ok(window) = window_query.single() else {
+        return visible_chunks;
+    };
+
+    // Get zoom scale from projection
+    let scale = if let Projection::Orthographic(ref ortho) = projection {
+        ortho.scale
+    } else {
+        return visible_chunks;
+    };
+
+    // Calculate visible area in world coordinates
+    let camera_pos = camera_transform.translation.truncate();
+    let half_width = (window.width() / 2.0) * scale;
+    let half_height = (window.height() / 2.0) * scale;
+
+    // Calculate visible bounds
+    let min_x = camera_pos.x - half_width;
+    let max_x = camera_pos.x + half_width;
+    let min_y = camera_pos.y - half_height;
+    let max_y = camera_pos.y + half_height;
+
+    // Convert to chunk coordinates
+    let min_chunk = coords::world_to_chunk(Vec2::new(min_x, min_y));
+    let max_chunk = coords::world_to_chunk(Vec2::new(max_x, max_y));
+
+    // Collect all chunks that intersect with the visible area
+    for x in min_chunk.x..=max_chunk.x {
+        for y in min_chunk.y..=max_chunk.y {
+            visible_chunks.insert(ChunkPos::new(x, y));
+        }
+    }
+
+    visible_chunks
+}
+
 /// Print a visual representation of loaded chunks
-fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos) {
+fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos, visible_chunks: HashSet<ChunkPos>) {
     // Determine the range to display (show area around camera)
     let view_radius = 6; // Show 13x13 grid centered on camera
     let min_x = camera_chunk.x - view_radius;
@@ -229,10 +284,15 @@ fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos) {
             let pos = ChunkPos::new(x, y);
             let is_loaded = loaded_chunks.contains(&pos);
             let is_camera = pos == camera_chunk;
+            let is_visible = visible_chunks.contains(&pos);
             let is_in_load_radius = camera_chunk.chebyshev_distance(&pos) <= CHUNK_LOAD_RADIUS;
 
             let symbol = if is_camera {
                 " @ "  // Camera position
+            } else if is_visible && is_loaded {
+                " ■ "  // Visible and loaded chunk
+            } else if is_visible {
+                " □ "  // Visible but not loaded
             } else if is_loaded && is_in_load_radius {
                 " █ "  // Loaded chunk in load radius
             } else if is_loaded {
@@ -249,8 +309,13 @@ fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos) {
     }
 
     grid.push_str("╚══════════════════════════════════════════╝\n");
-    grid.push_str("Legend: @ = Camera  █ = Loaded  ░ = Loading  · = Unloaded\n");
-    grid.push_str(&format!("Loaded chunks: {} | Camera: {:?}\n", loaded_chunks.len(), camera_chunk));
+    grid.push_str("Legend: @ = Camera  ■ = Visible+Loaded  □ = Visible  █ = Loaded  ░ = Loading  · = Unloaded\n");
+    grid.push_str(&format!(
+        "Loaded: {} | Visible: {} | Camera: {:?}\n",
+        loaded_chunks.len(),
+        visible_chunks.len(),
+        camera_chunk
+    ));
 
     info!("{}", grid);
 }
