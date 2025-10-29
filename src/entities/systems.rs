@@ -62,9 +62,9 @@ pub fn update_animation_from_direction(
 ) {
     for (direction, mut indices, sprite) in &mut query {
         if sprite.texture_atlas.is_some() {
-            // Determine frames per direction from the texture atlas layout
-            // This assumes standard 4-directional sprite sheets
-            let frames_per_direction = (indices.last - indices.first + 1) / 4;
+            // Calculate frames per direction from current row span
+            // When entities spawn, indices cover one row, so the count equals frames per direction
+            let frames_per_direction = indices.last - indices.first + 1;
             if frames_per_direction > 0 {
                 update_animation_for_direction(*direction, &mut indices, frames_per_direction);
             }

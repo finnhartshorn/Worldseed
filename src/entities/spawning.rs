@@ -1,5 +1,5 @@
+use super::{Direction, EntityBundle, ForestGuardian, Player, Position, Snail, WindingPath};
 use bevy::prelude::*;
-use super::{EntityBundle, Position, Player, ForestGuardian, Snail, Direction, WindingPath};
 
 /// Animation components
 #[derive(Component)]
@@ -60,7 +60,10 @@ pub fn spawn_forest_guardian(
     assets: &Res<AssetServer>,
     texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
 ) -> Entity {
-    let texture = assets.load(format!("creatures/forest_guardians/{}_guardian_idle.png", variant));
+    let texture = assets.load(format!(
+        "creatures/forest_guardians/{}_guardian_idle.png",
+        variant
+    ));
     let layout = TextureAtlasLayout::from_grid(UVec2::splat(32), 8, 4, None, None);
     let texture_atlas_layout = texture_atlas_layouts.add(layout);
 
@@ -76,7 +79,7 @@ pub fn spawn_forest_guardian(
                 },
             ),
             Transform::from_xyz(position.x, position.y, 1.0),
-            AnimationIndices::new(0, 7), // First row, 8 frames
+            AnimationIndices::new(0, 7),    // First row, 8 frames
             AnimationTimer::from_fps(6.67), // ~0.15s per frame
         ))
         .id()
@@ -96,8 +99,8 @@ pub fn spawn_snail(
     commands
         .spawn((
             Snail,
-            EntityBundle::new(position.x, position.y, 50.0),
-            WindingPath::new(20.0), // Slow winding movement at 20 px/s
+            EntityBundle::new(position.x, position.y, 500.0),
+            WindingPath::new(2.5), // Very slow winding movement at 2.5 px/s (8x slower)
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {
@@ -105,9 +108,9 @@ pub fn spawn_snail(
                     index: 0,
                 },
             ),
-            Transform::from_xyz(position.x, position.y, 1.0),
-            AnimationIndices::new(0, 3), // First row, 4 frames
-            AnimationTimer::from_fps(6.67), // ~0.15s per frame
+            Transform::from_xyz(position.x, position.y, 1.0).with_scale(Vec3::splat(4.0)), // 4x bigger
+            AnimationIndices::new(0, 3),    // First row, 4 frames
+            AnimationTimer::from_fps(2.0), // Slower animation at 2 FPS (~0.5s per frame)
         ))
         .id()
 }

@@ -47,10 +47,10 @@ impl Velocity {
 /// Direction the entity is facing (for animation purposes)
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    NorthWest = 0, // Row 0 in sprite sheets
-    NorthEast = 1, // Row 1 in sprite sheets
-    SouthWest = 2, // Row 2 in sprite sheets
-    SouthEast = 3, // Row 3 in sprite sheets
+    NorthEast = 0, // Row 0 in sprite sheets (up-right)
+    NorthWest = 1, // Row 1 in sprite sheets (up-left)
+    SouthEast = 2, // Row 2 in sprite sheets (down-right)
+    SouthWest = 3, // Row 3 in sprite sheets (down-left)
 }
 
 impl Direction {
