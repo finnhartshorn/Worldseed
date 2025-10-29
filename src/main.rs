@@ -9,8 +9,8 @@ mod tiles;
 mod world;
 
 use entities::{
-    animate_sprite, apply_velocity, spawn_forest_guardian, spawn_player, spawn_snail,
-    sync_position_with_transform, update_animation_from_direction,
+    animate_sprite, apply_velocity, snail_dirt_trail, spawn_forest_guardian, spawn_player,
+    spawn_snail, sync_position_with_transform, update_animation_from_direction,
     update_direction_from_velocity, update_roaming_behavior, update_state_from_velocity,
     update_winding_path, Position,
 };
@@ -53,6 +53,8 @@ fn main() {
                 update_direction_from_velocity,
                 update_animation_from_direction,
                 sync_position_with_transform.after(apply_velocity),
+                // Entity interactions with world
+                snail_dirt_trail.after(sync_position_with_transform),
                 // Animation
                 animate_sprite,
                 // Camera controls
@@ -62,6 +64,7 @@ fn main() {
                 loader::update_camera_chunk,
                 loader::load_chunks_around_camera.after(loader::update_camera_chunk),
                 loader::unload_distant_chunks.after(loader::load_chunks_around_camera),
+                loader::apply_tile_modifications.after(snail_dirt_trail),
             ),
         )
         .run();

@@ -201,6 +201,51 @@ pub fn log_world_stats(world: Res<WorldManager>) {
     debug!("World stats: {}", stats);
 }
 
+/// System to apply pending tile modifications to both cache and visual tilemap
+pub fn apply_tile_modifications(
+    mut world: ResMut<WorldManager>,
+    mut chunk_query: Query<(&Chunk, &mut TilemapChunkTileData)>,
+) {
+    use crate::tiles::chunk::coords;
+    use crate::tiles::{TILE_EMPTY, CHUNK_SIZE};
+    use bevy::sprite_render::TileData;
+
+    let modifications = world.take_tile_modifications();
+    if modifications.is_empty() {
+        return;
+    }
+
+    for modification in modifications {
+        // Convert world position to chunk position
+        let chunk_pos = coords::world_to_chunk(Vec2::new(modification.world_x, modification.world_y));
+
+        // Update the cache
+        if let Some(chunk_data) = world.chunk_cache.get_mut(&chunk_pos) {
+            let (local_x, local_y) = coords::world_to_local_tile(Vec2::new(modification.world_x, modification.world_y));
+
+            if chunk_data.set_tile(local_x, local_y, modification.tile_id) {
+                // Mark chunk as dirty
+                world.mark_dirty(chunk_pos);
+
+                // Find and update the visual tilemap entity
+                for (chunk, mut tile_data) in chunk_query.iter_mut() {
+                    if chunk.position == chunk_pos {
+                        let index = local_y * CHUNK_SIZE + local_x;
+                        if index < tile_data.0.len() {
+                            tile_data.0[index] = if modification.tile_id == TILE_EMPTY {
+                                None
+                            } else {
+                                Some(TileData::from_tileset_index((modification.tile_id - 1) as u16))
+                            };
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Calculate which chunks are visible in the camera viewport
 fn calculate_visible_chunks(
     camera_query: &Query<(&Transform, &Projection), With<Camera2d>>,

@@ -1,7 +1,16 @@
-use crate::tiles::{ChunkData, ChunkPos};
+use crate::tiles::{Chunk, ChunkData, ChunkPos};
 use bevy::prelude::*;
+use bevy::sprite_render::{TileData, TilemapChunkTileData};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+/// Represents a pending tile modification
+#[derive(Debug, Clone)]
+pub struct TileModification {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub tile_id: u16,
+}
 
 /// World manager resource that tracks all loaded chunks and their state
 #[derive(Resource)]
@@ -20,6 +29,9 @@ pub struct WorldManager {
 
     /// Current camera chunk position (for loading/unloading decisions)
     pub camera_chunk: Option<ChunkPos>,
+
+    /// Queue of pending tile modifications
+    pub pending_tile_modifications: Vec<TileModification>,
 }
 
 impl WorldManager {
@@ -30,6 +42,7 @@ impl WorldManager {
             chunk_cache: HashMap::new(),
             save_directory,
             camera_chunk: None,
+            pending_tile_modifications: Vec::new(),
         }
     }
 
@@ -98,6 +111,21 @@ impl WorldManager {
     /// Update the camera's chunk position
     pub fn update_camera_position(&mut self, chunk_pos: ChunkPos) {
         self.camera_chunk = Some(chunk_pos);
+    }
+
+    /// Queue a tile modification at a world position (in pixels)
+    /// The modification will be applied by the apply_tile_modifications system
+    pub fn queue_tile_modification(&mut self, world_x: f32, world_y: f32, tile_id: u16) {
+        self.pending_tile_modifications.push(TileModification {
+            world_x,
+            world_y,
+            tile_id,
+        });
+    }
+
+    /// Get all pending tile modifications and clear the queue
+    pub fn take_tile_modifications(&mut self) -> Vec<TileModification> {
+        std::mem::take(&mut self.pending_tile_modifications)
     }
 
     /// Get statistics about the world state

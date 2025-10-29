@@ -1,6 +1,8 @@
 use bevy::prelude::*;
-use super::{Position, Velocity, Direction, EntityState, AnimationIndices, WindingPath, RoamingBehavior};
+use super::{Position, Velocity, Direction, EntityState, AnimationIndices, WindingPath, RoamingBehavior, Snail};
 use super::spawning::{AnimationTimer, update_animation_for_direction};
+use crate::world::WorldManager;
+use crate::tiles::TILE_DIRT;
 
 /// Syncs entity Position component with Transform for rendering
 pub fn sync_position_with_transform(
@@ -240,6 +242,31 @@ pub fn update_winding_path(
         // Update velocity based on current angle
         velocity.x = path.current_angle.cos() * speed;
         velocity.y = path.current_angle.sin() * speed;
+    }
+}
+
+/// Makes snails turn tiles they walk over into dirt with a 20% chance
+pub fn snail_dirt_trail(
+    mut world: ResMut<WorldManager>,
+    snail_query: Query<&Position, (With<Snail>, Changed<Position>)>,
+) {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+
+    for position in snail_query.iter() {
+        // Generate a random number using hash of position and time
+        let hasher_builder = RandomState::new();
+        let mut hasher = hasher_builder.build_hasher();
+        position.x.to_bits().hash(&mut hasher);
+        position.y.to_bits().hash(&mut hasher);
+        std::time::SystemTime::now().hash(&mut hasher);
+        let hash = hasher.finish();
+        let rand_val = (hash as f32) / (u64::MAX as f32);
+
+        // 20% chance to turn tile into dirt
+        if rand_val < 0.2 {
+            world.queue_tile_modification(position.x, position.y, TILE_DIRT);
+        }
     }
 }
 

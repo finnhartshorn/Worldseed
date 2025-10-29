@@ -78,6 +78,9 @@ The codebase is organized into modules:
      - `update_animation_from_direction` - Selects correct sprite sheet row for direction
      - `sync_position_with_transform` - Syncs Position component to Transform for rendering
      - `animate_sprite` - Cycles through animation frames based on timers
+     - `snail_dirt_trail` - Makes snails turn tiles into dirt with 20% chance as they move
+     - `update_roaming_behavior` - Updates entities with RoamingBehavior component
+     - `update_winding_path` - Updates entities with WindingPath component
 
 3. **Animation System**
    - Component-based: `AnimationIndices` + `AnimationTimer` (defined in `entities/spawning.rs`)
@@ -107,6 +110,11 @@ The codebase is organized into modules:
    - When zoomed in, fewer chunks load since less area is visible
    - Chunks serialize when unloaded if dirty
    - Base constants defined in `src/tiles/constants.rs` (used as minimums)
+   - **Tile Modification System**: Entities can modify world tiles dynamically
+     - `TileModification` - Queued tile change requests (world position + tile ID)
+     - `queue_tile_modification()` - Queue a tile change for processing
+     - `apply_tile_modifications` system - Applies queued changes to both cache and visual tilemap
+     - Changes are marked dirty for automatic serialization
 
 6. **Camera System** (`move_camera`, `zoom_camera`)
    - Keyboard movement (WASD/Arrow keys) at 200 pixels/second
@@ -119,22 +127,31 @@ The codebase is organized into modules:
 
 Update systems run in this order:
 1. `update_tileset_image` - Process texture assets
-2. **Entity state pipeline:**
+2. **AI behaviors** (before velocity application):
+   - `update_roaming_behavior` - Updates roaming entities
+   - `update_winding_path` - Updates winding path entities
+3. **Entity state pipeline:**
    - `apply_velocity` - Update positions from velocity
    - `update_state_from_velocity` - Update entity states (Idle/Moving)
    - `update_direction_from_velocity` - Update facing direction
    - `update_animation_from_direction` - Update sprite row for direction
    - `sync_position_with_transform` - Sync Position to Transform (after velocity)
-3. `animate_sprite` - Cycle through animation frames
-4. `move_camera` - Handle camera movement input
-5. `zoom_camera` - Handle zoom input
-6. `update_camera_chunk` - Track which chunk camera is in
-7. `load_chunks_around_camera` - Load chunks in radius (after camera update)
-8. `unload_distant_chunks` - Unload far chunks (after loading)
+4. **Entity-world interactions:**
+   - `snail_dirt_trail` - Snails modify tiles as they move (after position sync)
+5. `animate_sprite` - Cycle through animation frames
+6. `move_camera` - Handle camera movement input
+7. `zoom_camera` - Handle zoom input
+8. `update_camera_chunk` - Track which chunk camera is in
+9. `load_chunks_around_camera` - Load chunks in radius (after camera update)
+10. `unload_distant_chunks` - Unload far chunks (after loading)
+11. `apply_tile_modifications` - Apply queued tile changes to cache and visuals
 
 **Critical orderings:**
+- AI behaviors run before velocity application to set movement intent
 - Entity state pipeline must run before animation to ensure correct sprite rows
 - `sync_position_with_transform` must run after `apply_velocity` to reflect position changes
+- Entity-world interactions run after position sync to use updated positions
+- `apply_tile_modifications` runs after all tile changes are queued
 - Camera updates before chunk loading to ensure correct chunks are loaded
 
 ### Resources
@@ -144,6 +161,8 @@ Update systems run in this order:
 - Maintains WorldStats (total chunks, loaded count, etc.)
 - Initialized at startup with `init_resource::<WorldManager>()`
 - Used by loader systems to coordinate chunk lifecycle
+- Manages tile modification queue via `queue_tile_modification()` and `take_tile_modifications()`
+- Tile changes update both cached `ChunkData` and visual `TilemapChunkTileData`
 
 ### Entity Organization
 
@@ -284,9 +303,39 @@ const CREATURE_SPRITE_OFFSET: f32 = 10.0; // Adjust per sprite
 
 ### Tilemap Modification
 
-- Tile data stored as `Vec<Option<TileData>>` in `TilemapChunkTileData`
-- Access tiles by `(y * chunk_width) + x`
-- Use `TileData::from_tileset_index(n)` to reference array texture layers
+Entities can modify world tiles dynamically through the WorldManager:
+
+```rust
+// In a system that modifies tiles:
+fn my_tile_modifier(
+    mut world: ResMut<WorldManager>,
+    query: Query<&Position, With<MyEntity>>,
+) {
+    for position in query.iter() {
+        // Queue a tile modification at the entity's position
+        world.queue_tile_modification(position.x, position.y, TILE_DIRT);
+    }
+}
+```
+
+**How it works:**
+1. Call `world.queue_tile_modification(x, y, tile_id)` to queue changes
+2. The `apply_tile_modifications` system processes all queued changes:
+   - Converts world position to chunk coordinates
+   - Updates cached `ChunkData` (for persistence)
+   - Updates visual `TilemapChunkTileData` (for rendering)
+   - Marks chunks as dirty for automatic saving
+3. Tile constants are defined in `src/tiles/constants.rs`:
+   - `TILE_EMPTY` (0) - Air/no tile
+   - `TILE_GRASS` (1) - Grass terrain
+   - `TILE_DIRT` (2) - Dirt terrain
+
+**Example: Snail Dirt Trail**
+The snail leaves dirt trails with a 20% chance as it moves:
+- Uses `Changed<Position>` to detect movement
+- Generates pseudo-random value from position hash
+- Queues `TILE_DIRT` modification at current position
+- Changes persist through chunk unload/reload cycles
 
 ## Bevy 0.17 Specifics
 
