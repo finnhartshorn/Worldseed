@@ -252,6 +252,7 @@ pub fn snail_dirt_trail(
 ) {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hash, Hasher};
+    use crate::tiles::LAYER_GROUND;
 
     for position in snail_query.iter() {
         // Generate a random number using hash of position and time
@@ -263,9 +264,9 @@ pub fn snail_dirt_trail(
         let hash = hasher.finish();
         let rand_val = (hash as f32) / (u64::MAX as f32);
 
-        // 20% chance to turn tile into dirt
+        // 20% chance to turn tile into dirt on the ground layer
         if rand_val < 0.2 {
-            world.queue_tile_modification(position.x, position.y, TILE_DIRT);
+            world.queue_tile_modification(position.x, position.y, TILE_DIRT, LAYER_GROUND);
         }
     }
 }

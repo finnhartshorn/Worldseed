@@ -73,30 +73,37 @@ pub fn load_chunks_around_camera(
             }
         };
 
-        // Convert to Bevy tilemap format
-        let tile_data = chunk_data.to_tilemap_data();
+        // Get world position for chunk
         let world_pos = chunk_pos.to_world(crate::tiles::CHUNK_PIXEL_SIZE);
 
-        // Spawn chunk entity
-        let entity = commands
-            .spawn((
-                TilemapChunk {
-                    chunk_size: UVec2::splat(crate::tiles::CHUNK_SIZE as u32),
-                    tile_display_size: UVec2::splat(TILE_DISPLAY_SIZE),
-                    tileset: asset_server.load("tilesets/terrain_array.png"),
-                    ..default()
-                },
-                TilemapChunkTileData(tile_data),
-                Transform::from_xyz(world_pos.x, world_pos.y, 0.0),
-                Chunk::new(chunk_pos),
-            ))
-            .id();
+        // Spawn one entity per layer
+        let mut layer_entities = [Entity::PLACEHOLDER; crate::tiles::NUM_LAYERS];
+        for layer_idx in 0..crate::tiles::NUM_LAYERS {
+            let tile_data = chunk_data.layer_to_tilemap_data(layer_idx);
+            let z_pos = crate::tiles::layer_z_position(layer_idx);
+
+            let entity = commands
+                .spawn((
+                    TilemapChunk {
+                        chunk_size: UVec2::splat(crate::tiles::CHUNK_SIZE as u32),
+                        tile_display_size: UVec2::splat(TILE_DISPLAY_SIZE),
+                        tileset: asset_server.load("tilesets/terrain_array.png"),
+                        ..default()
+                    },
+                    TilemapChunkTileData(tile_data),
+                    Transform::from_xyz(world_pos.x, world_pos.y, z_pos),
+                    Chunk::with_layer(chunk_pos, layer_idx),
+                ))
+                .id();
+
+            layer_entities[layer_idx] = entity;
+        }
 
         // Register in world manager
-        world.register_chunk(chunk_pos, entity);
+        world.register_chunk(chunk_pos, layer_entities);
         world.cache_chunk(chunk_data);
 
-        info!("Loaded chunk {:?} at entity {:?}", chunk_pos, entity);
+        info!("Loaded chunk {:?} with {} layers", chunk_pos, crate::tiles::NUM_LAYERS);
     }
 
     // Print chunk grid after loading
@@ -136,6 +143,7 @@ pub fn unload_distant_chunks(
     let has_unloaded_chunks = !chunks_to_unload.is_empty();
 
     for (entity, chunk_pos) in chunks_to_unload {
+        // Note: entity is just one layer entity, we need to despawn all layers
         // Save if dirty
         if world.is_dirty(&chunk_pos) {
             if let Some(chunk_data) = world.get_cached_chunk(&chunk_pos) {
@@ -152,12 +160,15 @@ pub fn unload_distant_chunks(
             }
         }
 
-        // Despawn entity
-        commands.entity(entity).despawn();
-        world.unregister_chunk(&chunk_pos);
+        // Despawn all layer entities
+        if let Some(layer_entities) = world.unregister_chunk(&chunk_pos) {
+            for layer_entity in layer_entities {
+                commands.entity(layer_entity).despawn();
+            }
+        }
         world.uncache_chunk(&chunk_pos);
 
-        info!("Unloaded chunk {:?}", chunk_pos);
+        info!("Unloaded chunk {:?} with all layers", chunk_pos);
     }
 
     // Print chunk grid after unloading
@@ -223,13 +234,13 @@ pub fn apply_tile_modifications(
         if let Some(chunk_data) = world.chunk_cache.get_mut(&chunk_pos) {
             let (local_x, local_y) = coords::world_to_local_tile(Vec2::new(modification.world_x, modification.world_y));
 
-            if chunk_data.set_tile(local_x, local_y, modification.tile_id) {
+            if chunk_data.set_tile(modification.layer, local_x, local_y, modification.tile_id) {
                 // Mark chunk as dirty
                 world.mark_dirty(chunk_pos);
 
-                // Find and update the visual tilemap entity
+                // Find and update the visual tilemap entity for this specific layer
                 for (chunk, mut tile_data) in chunk_query.iter_mut() {
-                    if chunk.position == chunk_pos {
+                    if chunk.position == chunk_pos && chunk.layer == modification.layer {
                         let index = local_y * CHUNK_SIZE + local_x;
                         if index < tile_data.0.len() {
                             tile_data.0[index] = if modification.tile_id == TILE_EMPTY {

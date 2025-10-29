@@ -10,13 +10,15 @@ pub struct TileModification {
     pub world_x: f32,
     pub world_y: f32,
     pub tile_id: u16,
+    pub layer: usize,
 }
 
 /// World manager resource that tracks all loaded chunks and their state
 #[derive(Resource)]
 pub struct WorldManager {
-    /// Map of chunk positions to their entity IDs
-    pub active_chunks: HashMap<ChunkPos, Entity>,
+    /// Map of chunk positions to their layer entities
+    /// Key: ChunkPos, Value: Array of entity IDs (one per layer)
+    pub active_chunks: HashMap<ChunkPos, [Entity; crate::tiles::NUM_LAYERS]>,
 
     /// Set of chunks that have been modified and need saving
     pub dirty_chunks: HashSet<ChunkPos>,
@@ -51,18 +53,23 @@ impl WorldManager {
         self.active_chunks.contains_key(pos)
     }
 
-    /// Get the entity for a loaded chunk
-    pub fn get_chunk_entity(&self, pos: &ChunkPos) -> Option<Entity> {
-        self.active_chunks.get(pos).copied()
+    /// Get the entities for a loaded chunk (all layers)
+    pub fn get_chunk_entities(&self, pos: &ChunkPos) -> Option<&[Entity; crate::tiles::NUM_LAYERS]> {
+        self.active_chunks.get(pos)
     }
 
-    /// Register a new chunk entity
-    pub fn register_chunk(&mut self, pos: ChunkPos, entity: Entity) {
-        self.active_chunks.insert(pos, entity);
+    /// Get a specific layer entity for a chunk
+    pub fn get_chunk_layer_entity(&self, pos: &ChunkPos, layer: usize) -> Option<Entity> {
+        self.active_chunks.get(pos).map(|entities| entities[layer])
+    }
+
+    /// Register chunk layer entities
+    pub fn register_chunk(&mut self, pos: ChunkPos, entities: [Entity; crate::tiles::NUM_LAYERS]) {
+        self.active_chunks.insert(pos, entities);
     }
 
     /// Unregister a chunk entity (when despawning)
-    pub fn unregister_chunk(&mut self, pos: &ChunkPos) -> Option<Entity> {
+    pub fn unregister_chunk(&mut self, pos: &ChunkPos) -> Option<[Entity; crate::tiles::NUM_LAYERS]> {
         self.active_chunks.remove(pos)
     }
 
@@ -115,11 +122,12 @@ impl WorldManager {
 
     /// Queue a tile modification at a world position (in pixels)
     /// The modification will be applied by the apply_tile_modifications system
-    pub fn queue_tile_modification(&mut self, world_x: f32, world_y: f32, tile_id: u16) {
+    pub fn queue_tile_modification(&mut self, world_x: f32, world_y: f32, tile_id: u16, layer: usize) {
         self.pending_tile_modifications.push(TileModification {
             world_x,
             world_y,
             tile_id,
+            layer,
         });
     }
 

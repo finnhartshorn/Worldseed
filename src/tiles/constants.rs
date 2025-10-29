@@ -16,6 +16,30 @@ pub const CHUNK_PIXEL_SIZE: f32 = TILE_SIZE * CHUNK_SIZE as f32; // 256 pixels
 /// Display size for tiles in the tilemap (we'll scale 8x8 to 32x32 for visibility)
 pub const TILE_DISPLAY_SIZE: u32 = 32;
 
+// Layer configuration
+/// Number of tile layers per chunk
+pub const NUM_LAYERS: usize = 3;
+
+/// Layer indices
+pub const LAYER_GROUND: usize = 0;      // Base terrain layer
+pub const LAYER_DECORATION: usize = 1;  // Decorative tiles (flowers, rocks, etc.)
+pub const LAYER_OVERLAY: usize = 2;     // Top layer (effects, particles, etc.)
+
+/// Z-positions for each layer in world space
+pub const LAYER_Z_GROUND: f32 = 0.0;
+pub const LAYER_Z_DECORATION: f32 = 0.1;
+pub const LAYER_Z_OVERLAY: f32 = 0.2;
+
+/// Helper to get Z position for a layer index
+pub const fn layer_z_position(layer: usize) -> f32 {
+    match layer {
+        LAYER_GROUND => LAYER_Z_GROUND,
+        LAYER_DECORATION => LAYER_Z_DECORATION,
+        LAYER_OVERLAY => LAYER_Z_OVERLAY,
+        _ => LAYER_Z_GROUND,
+    }
+}
+
 // Tile type constants
 /// Empty/air tile
 pub const TILE_EMPTY: u16 = 0;

@@ -53,10 +53,16 @@ The codebase is organized into modules:
 
 1. **Tilemap System** (`setup_world`, `update_tileset_image`)
    - Uses Bevy's `TilemapChunk` for grid-based terrain rendering
+   - **Multi-layer rendering**: Each chunk has 3 independent tile layers rendered at different Z-depths
    - Terrain tiles are stacked vertically in source images and reinterpreted as array textures
    - Chunk size: 32×32 tiles at 32×32 pixel display size (1,024 tiles per chunk)
    - Source tile resolution: 8×8 pixels (scaled 4× for display)
    - Tileset structure: terrain_array.png contains vertically stacked 8×8 tiles
+   - **Layer configuration** (defined in `src/tiles/constants.rs`):
+     - `LAYER_GROUND` (0) - Base terrain layer (Z: 0.0)
+     - `LAYER_DECORATION` (1) - Decorative tiles like flowers, rocks (Z: 0.1)
+     - `LAYER_OVERLAY` (2) - Effects, particles, top layer (Z: 0.2)
+   - Each chunk position spawns 3 separate `TilemapChunk` entities, one per layer
 
 2. **Entity System** (`entities/` module)
    - **Components** (`types.rs`):
@@ -100,7 +106,12 @@ The codebase is organized into modules:
    - `loader.rs` - Dynamic chunk loading/unloading based on camera position and zoom
    - `manager.rs` - WorldManager resource, tracks loaded chunks and statistics
    - `generator.rs` - Procedural terrain generation
-   - `serialization.rs` - Chunk persistence to disk
+   - `serialization.rs` - Chunk persistence to disk (v2 format supports multi-layer)
+   - **Multi-layer chunk management**:
+     - Each chunk position tracks 3 layer entities (ground, decoration, overlay)
+     - Loader spawns all layers at appropriate Z-depths when loading chunks
+     - Unloader despawns all layer entities together when unloading chunks
+     - ChunkData stores separate tile arrays for each layer
    - **Zoom-aware loading**: Load/unload radii automatically adjust based on camera zoom level
    - Load radius: Calculated from visible viewport + 2 chunk buffer (minimum 3 chunks)
    - Unload radius: Load radius + 2 chunks (hysteresis buffer)
@@ -110,11 +121,15 @@ The codebase is organized into modules:
    - When zoomed in, fewer chunks load since less area is visible
    - Chunks serialize when unloaded if dirty
    - Base constants defined in `src/tiles/constants.rs` (used as minimums)
-   - **Tile Modification System**: Entities can modify world tiles dynamically
-     - `TileModification` - Queued tile change requests (world position + tile ID)
-     - `queue_tile_modification()` - Queue a tile change for processing
+   - **Tile Modification System**: Entities can modify world tiles dynamically on specific layers
+     - `TileModification` - Queued tile change requests (world position + tile ID + layer)
+     - `queue_tile_modification(x, y, tile_id, layer)` - Queue a layer-specific tile change
      - `apply_tile_modifications` system - Applies queued changes to both cache and visual tilemap
-     - Changes are marked dirty for automatic serialization
+     - Changes target specific layers and are marked dirty for automatic serialization
+   - **Serialization format**:
+     - v2 format saves all 3 layers with layer count and checksum validation
+     - Backward compatible: can load v1 (single-layer) files and convert to multi-layer
+     - v1 chunks load with all tiles on ground layer, other layers empty
 
 6. **Camera System** (`move_camera`, `zoom_camera`)
    - Keyboard movement (WASD/Arrow keys) at 200 pixels/second
@@ -157,12 +172,13 @@ Update systems run in this order:
 ### Resources
 
 **WorldManager** (`world/manager.rs`)
-- Tracks all loaded chunks by ChunkPos
+- Tracks all loaded chunks by ChunkPos with multiple layer entities per chunk
+- Each chunk position maps to an array of 3 entities (one per layer)
 - Maintains WorldStats (total chunks, loaded count, etc.)
 - Initialized at startup with `init_resource::<WorldManager>()`
 - Used by loader systems to coordinate chunk lifecycle
-- Manages tile modification queue via `queue_tile_modification()` and `take_tile_modifications()`
-- Tile changes update both cached `ChunkData` and visual `TilemapChunkTileData`
+- Manages tile modification queue via `queue_tile_modification(x, y, tile_id, layer)` and `take_tile_modifications()`
+- Tile changes update both cached `ChunkData` (specific layer) and visual `TilemapChunkTileData` (matching layer entity)
 
 ### Entity Organization
 
@@ -211,7 +227,11 @@ assets/
 
 - Single `Camera2d` spawned at world origin (0, 0, 999)
 - Nearest-neighbor filtering via `ImagePlugin::default_nearest()` for pixel art
-- Z-ordering: tilemap at 0.0, sprites at 1.0+
+- Z-ordering:
+  - Ground layer: 0.0
+  - Decoration layer: 0.1
+  - Overlay layer: 0.2
+  - Entity sprites: 1.0+
 
 **Camera Controls** (for testing and navigation):
 - **Movement**: WASD or Arrow Keys (200 pixels/second)
@@ -303,7 +323,7 @@ const CREATURE_SPRITE_OFFSET: f32 = 10.0; // Adjust per sprite
 
 ### Tilemap Modification
 
-Entities can modify world tiles dynamically through the WorldManager:
+Entities can modify world tiles dynamically on specific layers through the WorldManager:
 
 ```rust
 // In a system that modifies tiles:
@@ -311,31 +331,49 @@ fn my_tile_modifier(
     mut world: ResMut<WorldManager>,
     query: Query<&Position, With<MyEntity>>,
 ) {
+    use crate::tiles::LAYER_GROUND;
+
     for position in query.iter() {
-        // Queue a tile modification at the entity's position
-        world.queue_tile_modification(position.x, position.y, TILE_DIRT);
+        // Queue a tile modification at the entity's position on ground layer
+        world.queue_tile_modification(position.x, position.y, TILE_DIRT, LAYER_GROUND);
     }
 }
 ```
 
 **How it works:**
-1. Call `world.queue_tile_modification(x, y, tile_id)` to queue changes
+1. Call `world.queue_tile_modification(x, y, tile_id, layer)` to queue layer-specific changes
 2. The `apply_tile_modifications` system processes all queued changes:
    - Converts world position to chunk coordinates
-   - Updates cached `ChunkData` (for persistence)
-   - Updates visual `TilemapChunkTileData` (for rendering)
+   - Updates cached `ChunkData` for the specific layer (for persistence)
+   - Updates visual `TilemapChunkTileData` for the matching layer entity (for rendering)
    - Marks chunks as dirty for automatic saving
-3. Tile constants are defined in `src/tiles/constants.rs`:
+3. Layer constants are defined in `src/tiles/constants.rs`:
+   - `LAYER_GROUND` (0) - Base terrain layer
+   - `LAYER_DECORATION` (1) - Decorative elements
+   - `LAYER_OVERLAY` (2) - Effects and overlays
+4. Tile type constants:
    - `TILE_EMPTY` (0) - Air/no tile
    - `TILE_GRASS` (1) - Grass terrain
    - `TILE_DIRT` (2) - Dirt terrain
 
 **Example: Snail Dirt Trail**
-The snail leaves dirt trails with a 20% chance as it moves:
+The snail leaves dirt trails on the ground layer with a 20% chance as it moves:
 - Uses `Changed<Position>` to detect movement
 - Generates pseudo-random value from position hash
-- Queues `TILE_DIRT` modification at current position
+- Queues `TILE_DIRT` modification on `LAYER_GROUND` at current position
 - Changes persist through chunk unload/reload cycles
+
+**Multi-layer Usage Examples:**
+```rust
+// Modify ground terrain
+world.queue_tile_modification(x, y, TILE_GRASS, LAYER_GROUND);
+
+// Add decoration on top of terrain
+world.queue_tile_modification(x, y, TILE_FLOWER, LAYER_DECORATION);
+
+// Add overlay effect
+world.queue_tile_modification(x, y, TILE_SPARKLE, LAYER_OVERLAY);
+```
 
 ## Bevy 0.17 Specifics
 
