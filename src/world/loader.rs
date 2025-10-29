@@ -36,8 +36,11 @@ pub fn load_chunks_around_camera(
         return;
     };
 
+    // Calculate dynamic load radius based on zoom level
+    let load_radius = calculate_load_radius(&camera_query, &window_query);
+
     // Get chunks that should be loaded
-    let chunks_to_load = camera_chunk.chunks_in_radius(CHUNK_LOAD_RADIUS);
+    let chunks_to_load = camera_chunk.chunks_in_radius(load_radius);
     let has_loaded_chunks = !chunks_to_load.is_empty();
 
     for chunk_pos in chunks_to_load {
@@ -99,7 +102,7 @@ pub fn load_chunks_around_camera(
     // Print chunk grid after loading
     if has_loaded_chunks {
         let visible_chunks = calculate_visible_chunks(&camera_query, &window_query);
-        print_chunk_grid(&world, camera_chunk, visible_chunks);
+        print_chunk_grid(&world, camera_chunk, visible_chunks, load_radius);
     }
 }
 
@@ -115,12 +118,16 @@ pub fn unload_distant_chunks(
         return;
     };
 
+    // Calculate dynamic radii based on zoom level
+    let load_radius = calculate_load_radius(&camera_query, &window_query);
+    let unload_radius = calculate_unload_radius(load_radius);
+
     let mut chunks_to_unload = Vec::new();
 
     // Find chunks outside the unload radius
     for (entity, chunk) in chunk_query.iter() {
         let distance = camera_chunk.chebyshev_distance(&chunk.position);
-        if distance > CHUNK_UNLOAD_RADIUS {
+        if distance > unload_radius {
             chunks_to_unload.push((entity, chunk.position));
         }
     }
@@ -156,7 +163,7 @@ pub fn unload_distant_chunks(
     // Print chunk grid after unloading
     if has_unloaded_chunks {
         let visible_chunks = calculate_visible_chunks(&camera_query, &window_query);
-        print_chunk_grid(&world, camera_chunk, visible_chunks);
+        print_chunk_grid(&world, camera_chunk, visible_chunks, load_radius);
     }
 }
 
@@ -243,10 +250,56 @@ fn calculate_visible_chunks(
     visible_chunks
 }
 
+/// Calculate the appropriate chunk load radius based on camera zoom level
+/// Returns a radius that covers the visible area plus a buffer for smooth loading
+fn calculate_load_radius(
+    camera_query: &Query<(&Transform, &Projection), With<Camera2d>>,
+    window_query: &Query<&Window>,
+) -> i32 {
+    // Get camera data
+    let Ok((_, projection)) = camera_query.single() else {
+        return CHUNK_LOAD_RADIUS;
+    };
+
+    // Get window size
+    let Ok(window) = window_query.single() else {
+        return CHUNK_LOAD_RADIUS;
+    };
+
+    // Get zoom scale from projection
+    let scale = if let Projection::Orthographic(ref ortho) = projection {
+        ortho.scale
+    } else {
+        return CHUNK_LOAD_RADIUS;
+    };
+
+    // Calculate visible area in world coordinates
+    let half_width = (window.width() / 2.0) * scale;
+    let half_height = (window.height() / 2.0) * scale;
+
+    // Calculate how many chunks are visible in each direction
+    let chunks_horizontal = (half_width / crate::tiles::CHUNK_PIXEL_SIZE).ceil() as i32;
+    let chunks_vertical = (half_height / crate::tiles::CHUNK_PIXEL_SIZE).ceil() as i32;
+
+    // Use the larger dimension and add buffer of 2 chunks for smooth loading
+    let visible_radius = chunks_horizontal.max(chunks_vertical);
+    let load_radius = visible_radius + 2;
+
+    // Ensure minimum radius of CHUNK_LOAD_RADIUS for close zoom
+    load_radius.max(CHUNK_LOAD_RADIUS)
+}
+
+/// Calculate the unload radius based on load radius with hysteresis buffer
+/// Always maintains +2 chunk buffer above load radius to prevent thrashing
+fn calculate_unload_radius(load_radius: i32) -> i32 {
+    load_radius + 2
+}
+
 /// Print a visual representation of loaded chunks
-fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos, visible_chunks: HashSet<ChunkPos>) {
+fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos, visible_chunks: HashSet<ChunkPos>, load_radius: i32) {
     // Determine the range to display (show area around camera)
-    let view_radius = 6; // Show 13x13 grid centered on camera
+    // Use load_radius + 1 to show chunks just outside the load area
+    let view_radius = (load_radius + 1).max(6); // Show at least 13x13 grid centered on camera
     let min_x = camera_chunk.x - view_radius;
     let max_x = camera_chunk.x + view_radius;
     let min_y = camera_chunk.y - view_radius;
@@ -285,7 +338,7 @@ fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos, visible_chunks
             let is_loaded = loaded_chunks.contains(&pos);
             let is_camera = pos == camera_chunk;
             let is_visible = visible_chunks.contains(&pos);
-            let is_in_load_radius = camera_chunk.chebyshev_distance(&pos) <= CHUNK_LOAD_RADIUS;
+            let is_in_load_radius = camera_chunk.chebyshev_distance(&pos) <= load_radius;
 
             let symbol = if is_camera {
                 " @ "  // Camera position
@@ -311,10 +364,12 @@ fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos, visible_chunks
     grid.push_str("╚══════════════════════════════════════════╝\n");
     grid.push_str("Legend: @ = Camera  ■ = Visible+Loaded  □ = Visible  █ = Loaded  ░ = Loading  · = Unloaded\n");
     grid.push_str(&format!(
-        "Loaded: {} | Visible: {} | Camera: {:?}\n",
+        "Loaded: {} | Visible: {} | Camera: {:?} | Load Radius: {} | Unload Radius: {}\n",
         loaded_chunks.len(),
         visible_chunks.len(),
-        camera_chunk
+        camera_chunk,
+        load_radius,
+        calculate_unload_radius(load_radius)
     ));
 
     info!("{}", grid);

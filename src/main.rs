@@ -1,12 +1,18 @@
 use bevy::{
     input::mouse::MouseWheel,
     prelude::*,
-    sprite_render::{TileData, TilemapChunk, TilemapChunkTileData},
+    sprite_render::TilemapChunk,
 };
 
+mod entities;
 mod tiles;
 mod world;
 
+use entities::{
+    animate_sprite, apply_velocity, spawn_forest_guardian, spawn_player, spawn_snail,
+    sync_position_with_transform, update_animation_from_direction,
+    update_direction_from_velocity, update_state_from_velocity, update_winding_path, Position,
+};
 use world::{loader, WorldManager};
 
 // UI sprite vertical offsets for proper centering
@@ -19,23 +25,6 @@ const SNAIL_SPRITE_OFFSET_X: f32 = 10.0;
 const ZOOM_MIN: f32 = 0.5;  // Max zoom in (smaller = more zoomed in)
 const ZOOM_MAX: f32 = 3.0;  // Max zoom out (larger = more zoomed out)
 const ZOOM_SPEED: f32 = 0.1; // Zoom change per input
-
-// Animation components
-#[derive(Component)]
-struct AnimationIndices {
-    first: usize,
-    last: usize,
-}
-
-#[derive(Component, Deref, DerefMut)]
-struct AnimationTimer(Timer);
-
-// Marker components for creatures
-#[derive(Component)]
-struct ForestGuardian;
-
-#[derive(Component)]
-struct Snail;
 
 // UI marker components
 #[derive(Component)]
@@ -52,10 +41,22 @@ fn main() {
         .add_systems(
             Update,
             (
+                // Asset and rendering updates
                 update_tileset_image,
+                // AI behaviors (before velocity application)
+                update_winding_path,
+                // Entity state updates
+                apply_velocity,
+                update_state_from_velocity,
+                update_direction_from_velocity,
+                update_animation_from_direction,
+                sync_position_with_transform.after(apply_velocity),
+                // Animation
                 animate_sprite,
+                // Camera controls
                 move_camera,
                 zoom_camera,
+                // World management
                 loader::update_camera_chunk,
                 loader::load_chunks_around_camera.after(loader::update_camera_chunk),
                 loader::unload_distant_chunks.after(loader::load_chunks_around_camera),
@@ -72,74 +73,32 @@ fn setup_world(
     // Spawn camera at origin
     commands.spawn((Camera2d, Transform::from_xyz(0.0, 0.0, 999.0)));
 
-    // Load character sprite sheet
-    let texture = assets.load("characters/human_walk.png");
+    // Spawn player character at world origin
+    spawn_player(
+        &mut commands,
+        Position::new(0.0, 0.0),
+        &assets,
+        &mut texture_atlas_layouts,
+    );
 
-    // Create texture atlas layout: 4 columns x 4 rows, each sprite is 32x32 pixels
-    let layout = TextureAtlasLayout::from_grid(UVec2::splat(32), 4, 4, None, None);
-    let texture_atlas_layout = texture_atlas_layouts.add(layout);
+    // Spawn forest guardian to the left
+    spawn_forest_guardian(
+        &mut commands,
+        Position::new(-100.0, 0.0),
+        "oak",
+        &assets,
+        &mut texture_atlas_layouts,
+    );
 
-    // Animation indices for the first row (frames 0-3)
-    let animation_indices = AnimationIndices { first: 0, last: 3 };
+    // Spawn snail to the right
+    spawn_snail(
+        &mut commands,
+        Position::new(100.0, 0.0),
+        &assets,
+        &mut texture_atlas_layouts,
+    );
 
-    // Spawn animated character sprite
-    commands.spawn((
-        Sprite::from_atlas_image(
-            texture,
-            TextureAtlas {
-                layout: texture_atlas_layout,
-                index: animation_indices.first,
-            },
-        ),
-        Transform::from_xyz(0.0, 0.0, 1.0), // Position at center, above tilemap
-        animation_indices,
-        // AnimationTimer(Timer::from_seconds(0.1, TimerMode::Repeating)),
-        AnimationTimer(Timer::from_seconds(0.2, TimerMode::Repeating)),
-    ));
-
-    // Load Forest Guardian texture
-    let guardian_texture = assets.load("creatures/forest_guardians/oak_guardian_idle.png");
-    let guardian_layout = TextureAtlasLayout::from_grid(UVec2::splat(32), 8, 4, None, None);
-    let guardian_atlas_layout = texture_atlas_layouts.add(guardian_layout);
-    let guardian_animation = AnimationIndices { first: 0, last: 7 }; // First row (direction)
-
-    // Spawn Forest Guardian
-    commands.spawn((
-        Sprite::from_atlas_image(
-            guardian_texture,
-            TextureAtlas {
-                layout: guardian_atlas_layout,
-                index: guardian_animation.first,
-            },
-        ),
-        Transform::from_xyz(-100.0, 0.0, 1.0),
-        guardian_animation,
-        AnimationTimer(Timer::from_seconds(0.15, TimerMode::Repeating)),
-        ForestGuardian,
-    ));
-
-    // Load Snail texture
-    let snail_texture = assets.load("creatures/snail/snail_crawl.png");
-    let snail_layout = TextureAtlasLayout::from_grid(UVec2::splat(32), 4, 4, None, None);
-    let snail_atlas_layout = texture_atlas_layouts.add(snail_layout);
-    let snail_animation = AnimationIndices { first: 0, last: 3 }; // First row (direction)
-
-    // Spawn Snail
-    commands.spawn((
-        Sprite::from_atlas_image(
-            snail_texture,
-            TextureAtlas {
-                layout: snail_atlas_layout,
-                index: snail_animation.first,
-            },
-        ),
-        Transform::from_xyz(100.0, 0.0, 1.0),
-        snail_animation,
-        AnimationTimer(Timer::from_seconds(0.15, TimerMode::Repeating)),
-        Snail,
-    ));
-
-    info!("Tilemap, characters, and creatures setup complete");
+    info!("World setup complete with entities using position and state components");
 }
 
 fn update_tileset_image(
@@ -163,23 +122,6 @@ fn update_tileset_image(
     }
 }
 
-fn animate_sprite(
-    time: Res<Time>,
-    mut query: Query<(&AnimationIndices, &mut AnimationTimer, &mut Sprite)>,
-) {
-    for (indices, mut timer, mut sprite) in &mut query {
-        timer.tick(time.delta());
-        if timer.just_finished() {
-            if let Some(atlas) = &mut sprite.texture_atlas {
-                atlas.index = if atlas.index == indices.last {
-                    indices.first
-                } else {
-                    atlas.index + 1
-                };
-            }
-        }
-    }
-}
 
 /// Camera movement system for testing chunk loading
 fn move_camera(
