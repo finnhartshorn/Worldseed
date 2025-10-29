@@ -1,4 +1,4 @@
-use super::{Direction, EntityBundle, ForestGuardian, Player, Position, Snail, WindingPath};
+use super::{Direction, EntityBundle, ForestGuardian, Player, Position, Snail, WindingPath, RoamingBehavior};
 use bevy::prelude::*;
 
 /// Animation components
@@ -71,6 +71,7 @@ pub fn spawn_forest_guardian(
         .spawn((
             ForestGuardian,
             EntityBundle::new(position.x, position.y, 150.0),
+            RoamingBehavior::new(position, 100.0, 15.0), // Roam within 100px at 15px/s
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {

@@ -11,7 +11,8 @@ mod world;
 use entities::{
     animate_sprite, apply_velocity, spawn_forest_guardian, spawn_player, spawn_snail,
     sync_position_with_transform, update_animation_from_direction,
-    update_direction_from_velocity, update_state_from_velocity, update_winding_path, Position,
+    update_direction_from_velocity, update_roaming_behavior, update_state_from_velocity,
+    update_winding_path, Position,
 };
 use world::{loader, WorldManager};
 
@@ -44,6 +45,7 @@ fn main() {
                 // Asset and rendering updates
                 update_tileset_image,
                 // AI behaviors (before velocity application)
+                update_roaming_behavior,
                 update_winding_path,
                 // Entity state updates
                 apply_velocity,

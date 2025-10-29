@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use super::{Position, Velocity, Direction, EntityState, AnimationIndices, WindingPath};
+use super::{Position, Velocity, Direction, EntityState, AnimationIndices, WindingPath, RoamingBehavior};
 use super::spawning::{AnimationTimer, update_animation_for_direction};
 
 /// Syncs entity Position component with Transform for rendering
@@ -87,6 +87,85 @@ pub fn animate_sprite(
                     atlas.index + 1
                 };
             }
+        }
+    }
+}
+
+/// Updates velocity for entities with roaming behavior
+/// This makes entities roam randomly within a fixed radius of their home position
+pub fn update_roaming_behavior(
+    time: Res<Time>,
+    mut query: Query<(&Position, &mut Velocity, &mut RoamingBehavior)>,
+) {
+    use std::f32::consts::PI;
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let delta = time.delta_secs();
+
+    for (position, mut velocity, mut roaming) in &mut query {
+        // If we're paused, count down the pause timer
+        if roaming.pause_timer > 0.0 {
+            roaming.pause_timer -= delta;
+            velocity.x = 0.0;
+            velocity.y = 0.0;
+            continue;
+        }
+
+        // Check if we've reached the target (within 5 pixels)
+        if roaming.is_at_target(position, 5.0) {
+            // Generate random numbers for next target
+            let hasher_builder = RandomState::new();
+            let mut hasher = hasher_builder.build_hasher();
+            position.x.to_bits().hash(&mut hasher);
+            position.y.to_bits().hash(&mut hasher);
+            std::time::SystemTime::now().hash(&mut hasher);
+            let hash = hasher.finish();
+
+            // Random angle
+            let rand_angle = ((hash as f32) / (u64::MAX as f32)) * 2.0 * PI;
+
+            // Random distance within roam radius
+            let mut hasher2 = hasher_builder.build_hasher();
+            (hash.wrapping_add(1)).hash(&mut hasher2);
+            let hash2 = hasher2.finish();
+            let rand_distance = ((hash2 as f32) / (u64::MAX as f32)) * roaming.roam_radius;
+
+            // Calculate new target position within bounds
+            let offset_x = rand_angle.cos() * rand_distance;
+            let offset_y = rand_angle.sin() * rand_distance;
+            roaming.target.x = roaming.home.x + offset_x;
+            roaming.target.y = roaming.home.y + offset_y;
+
+            // Generate random pause duration
+            let mut hasher3 = hasher_builder.build_hasher();
+            (hash2.wrapping_add(1)).hash(&mut hasher3);
+            let hash3 = hasher3.finish();
+            let rand_pause = (hash3 as f32) / (u64::MAX as f32);
+            roaming.pause_duration = roaming.min_pause_duration
+                + rand_pause * (roaming.max_pause_duration - roaming.min_pause_duration);
+            roaming.pause_timer = roaming.pause_duration;
+
+            // Stop moving while paused
+            velocity.x = 0.0;
+            velocity.y = 0.0;
+            continue;
+        }
+
+        // Calculate direction to target
+        let dx = roaming.target.x - position.x;
+        let dy = roaming.target.y - position.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+
+        // If we're very close, just stop (handled above on next frame)
+        if distance < 0.1 {
+            velocity.x = 0.0;
+            velocity.y = 0.0;
+        } else {
+            // Move towards target at roaming speed
+            let dir_x = dx / distance;
+            let dir_y = dy / distance;
+            velocity.x = dir_x * roaming.speed;
+            velocity.y = dir_y * roaming.speed;
         }
     }
 }

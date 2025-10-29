@@ -145,6 +145,82 @@ pub struct ForestGuardian;
 #[derive(Component)]
 pub struct Snail;
 
+/// Roaming behavior - makes entities roam within a fixed radius of their spawn point
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RoamingBehavior {
+    /// The center point to roam around (usually spawn position)
+    pub home: Position,
+    /// Maximum distance from home position
+    pub roam_radius: f32,
+    /// Movement speed in pixels per second
+    pub speed: f32,
+    /// Current target position to move towards
+    pub target: Position,
+    /// How long to wait at each target position (in seconds)
+    pub pause_duration: f32,
+    /// Time spent paused at current position
+    pub pause_timer: f32,
+    /// Minimum pause duration
+    pub min_pause_duration: f32,
+    /// Maximum pause duration
+    pub max_pause_duration: f32,
+}
+
+impl RoamingBehavior {
+    /// Create a new roaming behavior with default settings
+    pub fn new(home: Position, roam_radius: f32, speed: f32) -> Self {
+        Self {
+            home,
+            roam_radius,
+            speed,
+            target: home,
+            pause_duration: 2.0,
+            pause_timer: 0.0,
+            min_pause_duration: 1.0,
+            max_pause_duration: 4.0,
+        }
+    }
+
+    /// Create with custom pause duration range
+    pub fn with_pause_range(
+        home: Position,
+        roam_radius: f32,
+        speed: f32,
+        min_pause: f32,
+        max_pause: f32,
+    ) -> Self {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hash, Hasher};
+
+        let hasher_builder = RandomState::new();
+        let mut hasher = hasher_builder.build_hasher();
+        std::time::SystemTime::now().hash(&mut hasher);
+        let hash = hasher.finish();
+        let rand_val = (hash as f32) / (u64::MAX as f32);
+
+        Self {
+            home,
+            roam_radius,
+            speed,
+            target: home,
+            pause_duration: min_pause + rand_val * (max_pause - min_pause),
+            pause_timer: 0.0,
+            min_pause_duration: min_pause,
+            max_pause_duration: max_pause,
+        }
+    }
+
+    /// Check if entity is within roaming radius of home
+    pub fn is_within_bounds(&self, position: &Position) -> bool {
+        position.distance_to(&self.home) <= self.roam_radius
+    }
+
+    /// Check if entity is close to current target
+    pub fn is_at_target(&self, position: &Position, threshold: f32) -> bool {
+        position.distance_to(&self.target) < threshold
+    }
+}
+
 /// Winding path behavior - makes entities move in long, meandering paths
 #[derive(Component, Debug, Clone)]
 pub struct WindingPath {
