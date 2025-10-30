@@ -10,9 +10,9 @@ mod world;
 
 use entities::{
     animate_sprite, apply_velocity, snail_dirt_trail, spawn_forest_guardian, spawn_player,
-    spawn_snail, sync_position_with_transform, update_animation_from_direction,
+    spawn_snail, spawn_tree_spirit, sync_position_with_transform, update_animation_from_direction,
     update_direction_from_velocity, update_roaming_behavior, update_state_from_velocity,
-    update_winding_path, Position,
+    update_tree_growth, update_winding_path, Position, TreeVariant,
 };
 use world::{loader, WorldManager};
 
@@ -55,6 +55,8 @@ fn main() {
                 sync_position_with_transform.after(apply_velocity),
                 // Entity interactions with world
                 snail_dirt_trail.after(sync_position_with_transform),
+                // Tree growth
+                update_tree_growth,
                 // Animation
                 animate_sprite,
                 // Camera controls
@@ -99,6 +101,16 @@ fn setup_world(
     spawn_snail(
         &mut commands,
         Position::new(100.0, 0.0),
+        &assets,
+        &mut texture_atlas_layouts,
+    );
+
+    // Spawn a test tree spirit above the player - grows every 3 seconds per stage
+    spawn_tree_spirit(
+        &mut commands,
+        Position::new(0.0, 100.0),
+        TreeVariant::Oak,
+        3.0, // 3 seconds per growth stage
         &assets,
         &mut texture_atlas_layouts,
     );

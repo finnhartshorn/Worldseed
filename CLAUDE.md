@@ -72,9 +72,13 @@ The codebase is organized into modules:
      - `EntityState` - State machine (Idle, Moving, Attacking, Dead)
      - `Health` - Health tracking with damage/heal methods
      - `EntityBundle` - Convenient bundle with Position, Velocity, Direction, EntityState, Health
-     - Marker components: `Player`, `ForestGuardian`, `Snail`
+     - `GrowingTree` - Growth tracking for entities that grow over time (stage, timer, variant)
+     - `GrowthStage` - Growth stages: Seed (0.5x), Sapling (1.0x), YoungTree (1.5x), MatureTree (2.0x)
+     - `TreeVariant` - Tree types: Oak, Birch, Hickory, Pine, Willow
+     - Marker components: `Player`, `ForestGuardian`, `Snail`, `TreeSpirit`
    - **Spawning** (`spawning.rs`):
      - `spawn_player()`, `spawn_forest_guardian()`, `spawn_snail()` - Entity spawning functions
+     - `spawn_tree_spirit(variant, growth_time)` - Spawns growing tree entities
      - `AnimationIndices` - First and last frame indices for animation loops
      - `AnimationTimer` - Controls animation speed (supports FPS or duration)
    - **Systems** (`systems.rs`):
@@ -87,6 +91,7 @@ The codebase is organized into modules:
      - `snail_dirt_trail` - Makes snails turn tiles into dirt with 20% chance as they move
      - `update_roaming_behavior` - Updates entities with RoamingBehavior component
      - `update_winding_path` - Updates entities with WindingPath component
+     - `update_tree_growth` - Advances trees through growth stages using scale transitions
 
 3. **Animation System**
    - Component-based: `AnimationIndices` + `AnimationTimer` (defined in `entities/spawning.rs`)
@@ -153,13 +158,15 @@ Update systems run in this order:
    - `sync_position_with_transform` - Sync Position to Transform (after velocity)
 4. **Entity-world interactions:**
    - `snail_dirt_trail` - Snails modify tiles as they move (after position sync)
-5. `animate_sprite` - Cycle through animation frames
-6. `move_camera` - Handle camera movement input
-7. `zoom_camera` - Handle zoom input
-8. `update_camera_chunk` - Track which chunk camera is in
-9. `load_chunks_around_camera` - Load chunks in radius (after camera update)
-10. `unload_distant_chunks` - Unload far chunks (after loading)
-11. `apply_tile_modifications` - Apply queued tile changes to cache and visuals
+5. **Entity growth:**
+   - `update_tree_growth` - Advance trees through growth stages (scale-based)
+6. `animate_sprite` - Cycle through animation frames
+7. `move_camera` - Handle camera movement input
+8. `zoom_camera` - Handle zoom input
+9. `update_camera_chunk` - Track which chunk camera is in
+10. `load_chunks_around_camera` - Load chunks in radius (after camera update)
+11. `unload_distant_chunks` - Unload far chunks (after loading)
+12. `apply_tile_modifications` - Apply queued tile changes to cache and visuals
 
 **Critical orderings:**
 - AI behaviors run before velocity application to set movement intent
@@ -190,7 +197,7 @@ Update systems run in this order:
 - `Health` - Health tracking
 
 **Marker Components**:
-- Entity types (in `entities/types.rs`): `Player`, `ForestGuardian`, `Snail`
+- Entity types (in `entities/types.rs`): `Player`, `ForestGuardian`, `Snail`, `TreeSpirit`
 - UI components (in `main.rs`): `GuardianSubmenu`, `GuardianButton`
 
 **Key Design Principles:**
@@ -211,7 +218,8 @@ assets/
 │   │   └── *_guardian_idle.png (32×32 frames, 8×4 grid)
 │   ├── snail/
 │   │   └── snail_crawl.png (32×32 frames, 4×4 grid)
-│   └── tree_spirits/
+│   └── tree_spirits/  # 5 variants: oak, birch, hickory, pine, willow
+│       └── *_spirit_idle.png (32×32 frames, 8×4 grid)
 └── tilesets/
     └── terrain_array.png (8×16 stacked tiles)
 ```
@@ -374,6 +382,54 @@ world.queue_tile_modification(x, y, TILE_FLOWER, LAYER_DECORATION);
 // Add overlay effect
 world.queue_tile_modification(x, y, TILE_SPARKLE, LAYER_OVERLAY);
 ```
+
+### Growing Entities (Tree Growth System)
+
+Entities can grow over time through multiple stages using scale-based transitions:
+
+```rust
+// Spawn a tree that grows over time
+use entities::{spawn_tree_spirit, TreeVariant, Position};
+
+spawn_tree_spirit(
+    &mut commands,
+    Position::new(100.0, 50.0),
+    TreeVariant::Oak,  // Oak, Birch, Hickory, Pine, or Willow
+    5.0,  // 5 seconds per growth stage
+    &assets,
+    &mut texture_atlas_layouts,
+);
+```
+
+**How it works:**
+1. Trees spawn with `GrowingTree` component tracking stage, timer, and variant
+2. `GrowthStage` enum defines 4 stages with scale multipliers:
+   - `Seed` (0.5x scale) - Initial planted seed
+   - `Sapling` (1.0x scale) - Young sapling
+   - `YoungTree` (1.5x scale) - Growing tree
+   - `MatureTree` (2.0x scale) - Fully grown tree
+3. `update_tree_growth` system advances trees through stages:
+   - Tracks time in current stage
+   - Automatically advances when time threshold is reached
+   - Updates `Transform.scale` for smooth visual growth
+   - Logs growth progress to console
+4. Trees use the same sprite at different scales for all stages
+5. Growth is time-based and configurable per entity
+
+**Example: Custom growth timing**
+```rust
+// Fast growing tree (2 seconds per stage = 8 seconds total)
+spawn_tree_spirit(commands, pos, TreeVariant::Birch, 2.0, assets, layouts);
+
+// Slow growing tree (10 seconds per stage = 40 seconds total)
+spawn_tree_spirit(commands, pos, TreeVariant::Pine, 10.0, assets, layouts);
+```
+
+**Key advantages:**
+- Single sprite reused at different scales (memory efficient)
+- Smooth transitions via Transform.scale
+- Easy to add growth stages by extending `GrowthStage` enum
+- Pattern can be adapted for other growing entities (crops, buildings, etc.)
 
 ## Bevy 0.17 Specifics
 

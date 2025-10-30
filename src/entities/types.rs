@@ -145,6 +145,100 @@ pub struct ForestGuardian;
 #[derive(Component)]
 pub struct Snail;
 
+/// Marker component for growing tree spirits
+#[derive(Component)]
+pub struct TreeSpirit;
+
+/// Growth stages for trees
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrowthStage {
+    Seed,           // Initial planted seed (small sprite)
+    Sapling,        // Young sapling (medium sprite)
+    YoungTree,      // Growing tree (scaled up from sapling)
+    MatureTree,     // Fully grown tree (full size)
+}
+
+impl GrowthStage {
+    /// Get the scale factor for this growth stage
+    pub fn scale(&self) -> f32 {
+        match self {
+            GrowthStage::Seed => 0.5,
+            GrowthStage::Sapling => 1.0,
+            GrowthStage::YoungTree => 1.5,
+            GrowthStage::MatureTree => 2.0,
+        }
+    }
+
+    /// Get the next growth stage
+    pub fn next(&self) -> Option<GrowthStage> {
+        match self {
+            GrowthStage::Seed => Some(GrowthStage::Sapling),
+            GrowthStage::Sapling => Some(GrowthStage::YoungTree),
+            GrowthStage::YoungTree => Some(GrowthStage::MatureTree),
+            GrowthStage::MatureTree => None,
+        }
+    }
+}
+
+/// Component for trees that grow over time
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GrowingTree {
+    /// Current growth stage
+    pub stage: GrowthStage,
+    /// Time spent in current stage (seconds)
+    pub time_in_stage: f32,
+    /// Time required to advance to next stage (seconds)
+    pub time_to_next_stage: f32,
+    /// Tree variant (oak, birch, hickory, pine, willow)
+    pub variant: TreeVariant,
+}
+
+impl GrowingTree {
+    pub fn new(variant: TreeVariant) -> Self {
+        Self {
+            stage: GrowthStage::Seed,
+            time_in_stage: 0.0,
+            time_to_next_stage: 5.0, // 5 seconds per stage by default
+            variant,
+        }
+    }
+
+    pub fn with_growth_time(variant: TreeVariant, growth_time: f32) -> Self {
+        Self {
+            stage: GrowthStage::Seed,
+            time_in_stage: 0.0,
+            time_to_next_stage: growth_time,
+            variant,
+        }
+    }
+
+    pub fn is_mature(&self) -> bool {
+        self.stage == GrowthStage::MatureTree
+    }
+}
+
+/// Tree variants available
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeVariant {
+    Oak,
+    Birch,
+    Hickory,
+    Pine,
+    Willow,
+}
+
+impl TreeVariant {
+    pub fn as_str(&self) -> &str {
+        match self {
+            TreeVariant::Oak => "oak",
+            TreeVariant::Birch => "birch",
+            TreeVariant::Hickory => "hickory",
+            TreeVariant::Pine => "pine",
+            TreeVariant::Willow => "willow",
+        }
+    }
+}
+
 /// Roaming behavior - makes entities roam within a fixed radius of their spawn point
 #[derive(Component, Debug, Clone, Copy)]
 pub struct RoamingBehavior {

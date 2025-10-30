@@ -1,4 +1,4 @@
-use super::{Direction, EntityBundle, ForestGuardian, Player, Position, Snail, WindingPath, RoamingBehavior};
+use super::{Direction, EntityBundle, ForestGuardian, Player, Position, Snail, WindingPath, RoamingBehavior, TreeSpirit, GrowingTree, TreeVariant};
 use bevy::prelude::*;
 
 /// Animation components
@@ -112,6 +112,49 @@ pub fn spawn_snail(
             Transform::from_xyz(position.x, position.y, 1.0).with_scale(Vec3::splat(4.0)), // 4x bigger
             AnimationIndices::new(0, 3),    // First row, 4 frames
             AnimationTimer::from_fps(2.0), // Slower animation at 2 FPS (~0.5s per frame)
+        ))
+        .id()
+}
+
+/// Spawns a tree spirit that grows over time
+pub fn spawn_tree_spirit(
+    commands: &mut Commands,
+    position: Position,
+    variant: TreeVariant,
+    growth_time: f32, // Time in seconds for each growth stage
+    assets: &Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+) -> Entity {
+    // Start with the idle animation sprite (we'll use this for all growth stages with scaling)
+    let texture = assets.load(format!(
+        "creatures/tree_spirits/{}_spirit_idle.png",
+        variant.as_str()
+    ));
+
+    // Tree spirit sprite sheets are 4 rows (directions) with multiple frames per row
+    // We'll use idle animation (assume similar to guardians: multiple frames per direction)
+    let layout = TextureAtlasLayout::from_grid(UVec2::splat(32), 8, 4, None, None);
+    let texture_atlas_layout = texture_atlas_layouts.add(layout);
+
+    let growing_tree = GrowingTree::with_growth_time(variant, growth_time);
+    let initial_scale = growing_tree.stage.scale();
+
+    commands
+        .spawn((
+            TreeSpirit,
+            growing_tree,
+            Position::new(position.x, position.y),
+            Sprite::from_atlas_image(
+                texture,
+                TextureAtlas {
+                    layout: texture_atlas_layout,
+                    index: 0,
+                },
+            ),
+            Transform::from_xyz(position.x, position.y, 1.0)
+                .with_scale(Vec3::splat(initial_scale)),
+            AnimationIndices::new(0, 7),    // First row, 8 frames (assuming same as guardians)
+            AnimationTimer::from_fps(4.0), // Slow idle animation
         ))
         .id()
 }

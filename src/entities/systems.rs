@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use super::{Position, Velocity, Direction, EntityState, AnimationIndices, WindingPath, RoamingBehavior, Snail};
+use super::{Position, Velocity, Direction, EntityState, AnimationIndices, WindingPath, RoamingBehavior, Snail, GrowingTree, TreeSpirit};
 use super::spawning::{AnimationTimer, update_animation_for_direction};
 use crate::world::WorldManager;
 use crate::tiles::TILE_DIRT;
@@ -267,6 +267,42 @@ pub fn snail_dirt_trail(
         // 20% chance to turn tile into dirt on the ground layer
         if rand_val < 0.2 {
             world.queue_tile_modification(position.x, position.y, TILE_DIRT, LAYER_GROUND);
+        }
+    }
+}
+
+/// Advances tree growth through stages over time
+pub fn update_tree_growth(
+    time: Res<Time>,
+    mut tree_query: Query<(&mut GrowingTree, &mut Transform), With<TreeSpirit>>,
+) {
+    let delta = time.delta_secs();
+
+    for (mut growing_tree, mut transform) in tree_query.iter_mut() {
+        // Skip if already mature
+        if growing_tree.is_mature() {
+            continue;
+        }
+
+        // Accumulate time in current stage
+        growing_tree.time_in_stage += delta;
+
+        // Check if ready to advance to next stage
+        if growing_tree.time_in_stage >= growing_tree.time_to_next_stage {
+            if let Some(next_stage) = growing_tree.stage.next() {
+                // Advance to next stage
+                growing_tree.stage = next_stage;
+                growing_tree.time_in_stage = 0.0;
+
+                // Update scale based on new stage
+                let new_scale = next_stage.scale();
+                transform.scale = Vec3::splat(new_scale);
+
+                info!(
+                    "Tree advanced to stage {:?} with scale {:.1}",
+                    next_stage, new_scale
+                );
+            }
         }
     }
 }
