@@ -6,6 +6,7 @@ use bevy::{
 };
 
 mod entities;
+mod map;
 mod tiles;
 mod world;
 
@@ -15,6 +16,7 @@ use entities::{
     update_direction_from_velocity, update_roaming_behavior, update_state_from_velocity,
     update_tree_growth, update_tree_spawning, update_winding_path, Position, TreeVariant,
 };
+use map::MapPlugin;
 use world::{loader, WorldManager};
 
 // UI sprite vertical offsets for proper centering
@@ -75,6 +77,7 @@ impl PlacementMode {
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
+        .add_plugins(MapPlugin)
         .init_resource::<WorldManager>()
         .init_resource::<PlacementMode>()
         .add_systems(Startup, (setup_world, setup_ui))

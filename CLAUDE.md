@@ -48,6 +48,7 @@ The codebase is organized into modules:
 - `src/entities/` - Entity system, components, spawning, and behavior systems
 - `src/world/` - World management, chunk loading/unloading, generation, serialization
 - `src/tiles/` - Tile system, chunk data structures, constants, registry
+- `src/map/` - World map modal system with terrain-aware rendering
 
 ### Core Systems
 
@@ -151,6 +152,33 @@ The codebase is organized into modules:
    - Camera position and zoom level both drive chunk loading/unloading
    - Zoom level dynamically adjusts how many chunks are loaded (more when zoomed out, fewer when zoomed in)
 
+7. **World Map System** (`map/` module)
+   - **Plugin**: `MapPlugin` integrates map systems
+   - **UI**: Full-screen modal overlay (95% width/height) with semi-transparent dark background
+   - **Toggle**: Press 'M' key to show/hide map
+   - **Components & Resources**:
+     - `MapConfig` - Configurable `chunks_per_map_tile` ratio (default: 4 chunks = 1 map tile)
+     - `MapState` - Tracks map visibility
+     - `MapModal`, `MapContent` - UI marker components
+     - `MapTile` - Marker for dynamically spawned map tile sprites
+   - **Terrain-Aware Rendering**:
+     - Uses Minifantasy Maps tileset (8×8 pixel cartographic tiles)
+     - Analyzes chunk terrain composition (ground layer) to determine map tiles
+     - Shows grass tiles for grass-dominant areas (>30% grass)
+     - Shows dirt tiles for dirt-dominant areas (>50% dirt)
+     - Shows dark water for unexplored/unloaded areas
+   - **Systems**:
+     - `toggle_map_visibility` - Handles 'M' key press to show/hide modal
+     - `update_map_display` - Renders map tiles based on loaded chunks
+     - `determine_map_tile_from_chunks` - Analyzes terrain composition per map tile
+   - **Asset Structure**: Uses `assets/maps/Minifantasy_MapsLandAndSea.png` (216×88 pixels = 27×11 tiles)
+   - **Map Tile Constants** (`map/constants.rs`):
+     - `MAP_TILE_SIZE` = 8.0 pixels
+     - `MAP_TILE_GRASS_PLAIN` (0) - Bright grass terrain
+     - `MAP_TILE_DIRT` (2) - Brown dirt terrain
+     - `MAP_TILE_UNKNOWN` (54) - Deep water for unexplored
+   - **Dynamic Grid**: Automatically sizes based on explored area, no gaps between tiles
+
 ### System Ordering
 
 Update systems run in this order:
@@ -239,6 +267,8 @@ assets/
 │   │   └── snail_crawl.png (32×32 frames, 4×4 grid)
 │   └── tree_spirits/  # 5 variants: oak, birch, hickory, pine, willow
 │       └── *_spirit_idle.png (32×32 frames, 8×4 grid)
+├── maps/              # World map cartographic tiles
+│   └── Minifantasy_MapsLandAndSea.png (216×88 pixels = 27×11 tiles at 8×8)
 └── tilesets/
     └── terrain_array.png (8×16 stacked tiles)
 ```
@@ -265,6 +295,7 @@ assets/
 - **Zoom In**: Mouse scroll up or Equals (=) key
 - **Zoom Out**: Mouse scroll down or Minus (-) key
 - **Zoom Range**: 0.5× (max zoom in) to 3.0× (max zoom out)
+- **World Map**: Press 'M' to toggle full-screen map modal
 - Camera position and zoom level determine which chunks load/unload
 - Zooming out increases visible area and automatically loads more chunks
 - Zooming in decreases visible area and allows distant chunks to unload
@@ -559,6 +590,77 @@ TreeSpawner::new(
 - Same pattern for Hickory, Pine, and Willow guardians
 - This creates natural "groves" around each guardian while allowing some variety
 
+### World Map System
+
+The world map provides a cartographic view of explored terrain using Minifantasy Maps tiles.
+
+**Basic Usage:**
+- Press 'M' to open/close the map modal
+- Map displays all loaded chunks with terrain-aware tiles
+- Configurable chunks-per-map-tile ratio
+
+**Implementation Details:**
+```rust
+// Add MapPlugin to your app
+use map::MapPlugin;
+
+fn main() {
+    App::new()
+        .add_plugins(MapPlugin)
+        // ... other setup
+}
+
+// Configure chunks per map tile (optional)
+fn setup(mut map_config: ResMut<MapConfig>) {
+    map_config.chunks_per_map_tile = 2; // 2 chunks = 1 map tile
+}
+```
+
+**How Terrain Analysis Works:**
+1. System groups loaded chunks by map tile position (based on `chunks_per_map_tile`)
+2. For each map tile, scans all contributing chunks:
+   - Reads ground layer tiles from `WorldManager.chunk_cache`
+   - Counts `TILE_GRASS` and `TILE_DIRT` occurrences
+   - Calculates terrain percentages
+3. Selects appropriate map tile:
+   - >50% dirt → Brown dirt tile (`MAP_TILE_DIRT`)
+   - >30% grass → Green grass tile (`MAP_TILE_GRASS_PLAIN`)
+   - Unexplored → Dark water tile (`MAP_TILE_UNKNOWN`)
+
+**UI Implementation Pattern (Bevy 0.17):**
+```rust
+// Map tiles use ImageNode with TextureAtlas inside
+grid.spawn((
+    MapTile,
+    ImageNode {
+        image: texture.clone(),
+        texture_atlas: Some(TextureAtlas {
+            layout: texture_atlas_layout.clone(),
+            index: tile_index,
+        }),
+        ..default()
+    },
+    Node {
+        width: Val::Px(8.0),
+        height: Val::Px(8.0),
+        ..default()
+    },
+));
+```
+
+**Key Features:**
+- Real-time terrain visualization based on actual chunk data
+- Seamless grid layout (no gaps between 8×8 tiles)
+- Dynamic bounds calculation - map auto-sizes to explored area
+- Uses cached chunk data for efficient terrain analysis
+- Updates when map visibility toggles (on-demand rendering)
+
+**Extending the System:**
+To add new terrain types:
+1. Add tile constants to `src/map/constants.rs`
+2. Update `determine_map_tile_from_chunks()` logic in `src/map/systems.rs`
+3. Add corresponding `TILE_*` constants to `src/tiles/constants.rs`
+
 ## Bevy 0.17 Specifics
 
 - Uses new `sprite_render` module for tilemaps (`TilemapChunk`, `TilemapChunkTileData`, `TileData`)
@@ -566,7 +668,10 @@ TreeSpawner::new(
 - `MessageReader` for asset events and input (replaces `EventReader` for `AssetEvent<T>` and `MouseWheel`)
 - `Single<T>` query for single-entity queries (cleaner than `Query<T, With<...>>.single_mut()`)
 - `ImageNode` component for UI sprites (replaces old `UiImage`)
+  - **Important**: `TextureAtlas` goes inside `ImageNode.texture_atlas` field (not as separate component)
+  - Pattern: `ImageNode { image: handle, texture_atlas: Some(TextureAtlas { ... }), ... }`
 - `Node` component for UI layout (replaces old `Style`)
+- UI Grid layout: Use `Display::Grid` with `grid_template_columns` and `grid_template_rows` vectors
 
 ## Asset References
 
