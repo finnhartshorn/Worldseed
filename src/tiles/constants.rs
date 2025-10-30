@@ -50,6 +50,27 @@ pub const TILE_GRASS: u16 = 1;
 /// Dirt tile
 pub const TILE_DIRT: u16 = 2;
 
+/// Fog of war - solid black
+pub const TILE_FOG_BLACK: u16 = 3;
+
+/// Shadow tiles for fog edges (from terrain.png grid positions)
+pub const TILE_SHADOW_LIGHT_1: u16 = 4;  // Light gray shadow
+pub const TILE_SHADOW_LIGHT_2: u16 = 5;  // Another light variant
+pub const TILE_SHADOW_MEDIUM_1: u16 = 6; // Medium gray shadow
+pub const TILE_SHADOW_MEDIUM_2: u16 = 7; // Another medium variant
+pub const TILE_SHADOW_DARK_1: u16 = 8;   // Dark gray shadow
+pub const TILE_SHADOW_DARK_2: u16 = 9;   // Another dark variant
+
+/// Array of all shadow tiles for easy iteration
+pub const SHADOW_TILES: [u16; 6] = [
+    TILE_SHADOW_LIGHT_1,
+    TILE_SHADOW_LIGHT_2,
+    TILE_SHADOW_MEDIUM_1,
+    TILE_SHADOW_MEDIUM_2,
+    TILE_SHADOW_DARK_1,
+    TILE_SHADOW_DARK_2,
+];
+
 /// Maximum number of tile types (u16 can hold 0-65535)
 pub const MAX_TILE_TYPES: usize = u16::MAX as usize + 1;
 

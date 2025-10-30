@@ -14,6 +14,7 @@ use entities::{
     update_direction_from_velocity, update_roaming_behavior, update_state_from_velocity,
     update_tree_growth, update_tree_spawning, update_winding_path, Position, TreeVariant,
 };
+use tiles::{LAYER_OVERLAY, SHADOW_TILES, TILE_FOG_BLACK};
 use world::{loader, WorldManager};
 
 // UI sprite vertical offsets for proper centering
@@ -34,11 +35,31 @@ struct GuardianSubmenu;
 #[derive(Component)]
 struct GuardianButton;
 
+#[derive(Component)]
+struct FogTestInfo;
+
+// Fog of war testing resource
+#[derive(Resource)]
+struct FogTestState {
+    shadow_index: usize,
+    fog_active: bool,
+}
+
+impl Default for FogTestState {
+    fn default() -> Self {
+        Self {
+            shadow_index: 0,
+            fog_active: false,
+        }
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         .init_resource::<WorldManager>()
-        .add_systems(Startup, (setup_world, setup_ui))
+        .init_resource::<FogTestState>()
+        .add_systems(Startup, (setup_world, setup_ui, setup_fog_test_ui))
         .add_systems(
             Update,
             (
@@ -63,6 +84,9 @@ fn main() {
                 // Camera controls
                 move_camera,
                 zoom_camera,
+                // Fog of war testing
+                fog_test_input,
+                update_fog_test_ui,
                 // World management
                 loader::update_camera_chunk,
                 loader::load_chunks_around_camera.after(loader::update_camera_chunk),
@@ -129,10 +153,10 @@ fn update_tileset_image(
         for chunk in chunk_query.iter() {
             if event.is_loaded_with_dependencies(chunk.tileset.id()) {
                 if let Some(image) = images.get_mut(&chunk.tileset) {
-                    // Reinterpret the vertically-stacked texture as an array texture with 2 layers
-                    // terrain_array.png is 8x16 (two 8x8 tiles stacked)
-                    image.reinterpret_stacked_2d_as_array(2);
-                    info!("Tileset reinterpreted as 2-layer array texture");
+                    // Reinterpret the vertically-stacked texture as an array texture
+                    // terrain_array.png is 8x80 (ten 8x8 tiles stacked)
+                    image.reinterpret_stacked_2d_as_array(10);
+                    info!("Tileset reinterpreted as 10-layer array texture");
                 }
                 break; // Only need to reinterpret once per texture
             }
@@ -483,5 +507,178 @@ fn guardian_button_right_click(
         } else {
             Display::None
         };
+    }
+}
+
+/// Setup UI for fog of war testing
+fn setup_fog_test_ui(mut commands: Commands) {
+    // Top-right info panel
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(10.0),
+            top: Val::Px(10.0),
+            padding: UiRect::all(Val::Px(10.0)),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(5.0),
+            ..default()
+        })
+        .with_children(|parent| {
+            parent.spawn((
+                FogTestInfo,
+                Text::new("Fog Test: OFF\nShadow: Light 1\n\nF - Toggle Fog\nN - Next Shadow\nP - Prev Shadow\nC - Clear Fog"),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+                Node {
+                    padding: UiRect::all(Val::Px(8.0)),
+                    ..default()
+                },
+            ));
+        });
+}
+
+/// Handle keyboard input for fog testing
+fn fog_test_input(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut fog_state: ResMut<FogTestState>,
+    mut world: ResMut<WorldManager>,
+    camera_query: Query<&Transform, With<Camera2d>>,
+) {
+    // Toggle fog on/off with F key
+    if keyboard.just_pressed(KeyCode::KeyF) {
+        fog_state.fog_active = !fog_state.fog_active;
+
+        if fog_state.fog_active {
+            // Place fog pattern around camera
+            if let Ok(camera_transform) = camera_query.single() {
+                let cam_x = camera_transform.translation.x;
+                let cam_y = camera_transform.translation.y;
+
+                // Create a 10x10 grid of fog tiles around camera
+                for dx in -5i32..=5 {
+                    for dy in -5i32..=5 {
+                        let x = cam_x + (dx * 32) as f32;
+                        let y = cam_y + (dy * 32) as f32;
+
+                        // Center area is clear (explored)
+                        if dx.abs() <= 2 && dy.abs() <= 2 {
+                            continue;
+                        }
+
+                        // Edge of fog uses shadow tile
+                        if dx.abs() == 3 || dy.abs() == 3 {
+                            let shadow_tile = SHADOW_TILES[fog_state.shadow_index];
+                            world.queue_tile_modification(x, y, shadow_tile, LAYER_OVERLAY);
+                        } else {
+                            // Outer area is full black fog
+                            world.queue_tile_modification(x, y, TILE_FOG_BLACK, LAYER_OVERLAY);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Next shadow with N key
+    if keyboard.just_pressed(KeyCode::KeyN) {
+        fog_state.shadow_index = (fog_state.shadow_index + 1) % SHADOW_TILES.len();
+
+        // If fog is active, update the shadow tiles
+        if fog_state.fog_active {
+            if let Ok(camera_transform) = camera_query.single() {
+                let cam_x = camera_transform.translation.x;
+                let cam_y = camera_transform.translation.y;
+
+                // Update shadow ring
+                for dx in -5i32..=5 {
+                    for dy in -5i32..=5 {
+                        if dx.abs() == 3 || dy.abs() == 3 {
+                            let x = cam_x + (dx * 32) as f32;
+                            let y = cam_y + (dy * 32) as f32;
+                            let shadow_tile = SHADOW_TILES[fog_state.shadow_index];
+                            world.queue_tile_modification(x, y, shadow_tile, LAYER_OVERLAY);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Previous shadow with P key
+    if keyboard.just_pressed(KeyCode::KeyP) {
+        fog_state.shadow_index = if fog_state.shadow_index == 0 {
+            SHADOW_TILES.len() - 1
+        } else {
+            fog_state.shadow_index - 1
+        };
+
+        // If fog is active, update the shadow tiles
+        if fog_state.fog_active {
+            if let Ok(camera_transform) = camera_query.single() {
+                let cam_x = camera_transform.translation.x;
+                let cam_y = camera_transform.translation.y;
+
+                // Update shadow ring
+                for dx in -5i32..=5 {
+                    for dy in -5i32..=5 {
+                        if dx.abs() == 3 || dy.abs() == 3 {
+                            let x = cam_x + (dx * 32) as f32;
+                            let y = cam_y + (dy * 32) as f32;
+                            let shadow_tile = SHADOW_TILES[fog_state.shadow_index];
+                            world.queue_tile_modification(x, y, shadow_tile, LAYER_OVERLAY);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Clear fog with C key
+    if keyboard.just_pressed(KeyCode::KeyC) {
+        if let Ok(camera_transform) = camera_query.single() {
+            let cam_x = camera_transform.translation.x;
+            let cam_y = camera_transform.translation.y;
+
+            // Clear the fog area
+            for dx in -5i32..=5 {
+                for dy in -5i32..=5 {
+                    let x = cam_x + (dx * 32) as f32;
+                    let y = cam_y + (dy * 32) as f32;
+                    world.queue_tile_modification(x, y, 0, LAYER_OVERLAY);
+                }
+            }
+        }
+        fog_state.fog_active = false;
+    }
+}
+
+/// Update fog test UI text
+fn update_fog_test_ui(
+    fog_state: Res<FogTestState>,
+    mut text_query: Query<&mut Text, With<FogTestInfo>>,
+) {
+    if fog_state.is_changed() {
+        if let Ok(mut text) = text_query.single_mut() {
+            let shadow_names = [
+                "Light 1",
+                "Light 2",
+                "Medium 1",
+                "Medium 2",
+                "Dark 1",
+                "Dark 2",
+            ];
+
+            let status = if fog_state.fog_active { "ON" } else { "OFF" };
+            let shadow_name = shadow_names[fog_state.shadow_index];
+
+            text.0 = format!(
+                "Fog Test: {}\nShadow: {}\n\nF - Toggle Fog\nN - Next Shadow\nP - Prev Shadow\nC - Clear Fog",
+                status, shadow_name
+            );
+        }
     }
 }
