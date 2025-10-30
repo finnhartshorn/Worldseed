@@ -106,6 +106,14 @@ The codebase is organized into modules:
    - Buttons display creature sprites with custom offsets for proper centering
    - Guardian button has expandable submenu showing 5 guardian variants
    - UI sprites require vertical offset constants (see `*_SPRITE_OFFSET` constants)
+   - **Entity Placement System**: Interactive entity spawning via UI
+     - `PlacementMode` resource tracks selected entity type for placement
+     - `EntityType` component on buttons identifies what entity they spawn (Player, ForestGuardian variants, Snail)
+     - `update_button_selection` system provides visual feedback (highlight selected buttons)
+     - `handle_entity_placement` system spawns entities at mouse click positions
+     - Buttons toggle selection on/off (click to select, click again to deselect)
+     - World position conversion accounts for camera zoom and position
+     - Selected buttons highlight with brighter colors and borders
 
 5. **World Management System** (`world/` module)
    - `loader.rs` - Dynamic chunk loading/unloading based on camera position and zoom
@@ -163,10 +171,13 @@ Update systems run in this order:
 6. `animate_sprite` - Cycle through animation frames
 7. `move_camera` - Handle camera movement input
 8. `zoom_camera` - Handle zoom input
-9. `update_camera_chunk` - Track which chunk camera is in
-10. `load_chunks_around_camera` - Load chunks in radius (after camera update)
-11. `unload_distant_chunks` - Unload far chunks (after loading)
-12. `apply_tile_modifications` - Apply queued tile changes to cache and visuals
+9. **Entity placement** (UI interaction systems):
+   - `handle_entity_placement` - Spawn entities at mouse cursor position
+   - `update_button_selection` - Update button visual feedback based on selection
+10. `update_camera_chunk` - Track which chunk camera is in
+11. `load_chunks_around_camera` - Load chunks in radius (after camera update)
+12. `unload_distant_chunks` - Unload far chunks (after loading)
+13. `apply_tile_modifications` - Apply queued tile changes to cache and visuals
 
 **Critical orderings:**
 - AI behaviors run before velocity application to set movement intent
@@ -187,6 +198,13 @@ Update systems run in this order:
 - Manages tile modification queue via `queue_tile_modification(x, y, tile_id, layer)` and `take_tile_modifications()`
 - Tile changes update both cached `ChunkData` (specific layer) and visual `TilemapChunkTileData` (matching layer entity)
 
+**PlacementMode** (`main.rs`)
+- Tracks currently selected entity type for UI-based entity placement
+- Holds `Option<EntityType>` where EntityType is Player, ForestGuardian(variant), or Snail
+- Methods: `select()`, `deselect()`, `is_selected()`
+- Initialized at startup with `init_resource::<PlacementMode>()`
+- Updated by button click interactions, drives entity spawning on mouse clicks
+
 ### Entity Organization
 
 **Core Entity Components** (in `entities/types.rs`):
@@ -198,7 +216,8 @@ Update systems run in this order:
 
 **Marker Components**:
 - Entity types (in `entities/types.rs`): `Player`, `ForestGuardian`, `Snail`, `TreeSpirit`
-- UI components (in `main.rs`): `GuardianSubmenu`, `GuardianButton`
+- UI components (in `main.rs`): `GuardianSubmenu`, `GuardianButton`, `EntityType`
+  - `EntityType` enum identifies button entity types: Player, ForestGuardian(variant), Snail
 
 **Key Design Principles:**
 - `Position` is separate from `Transform` - Position is for game logic, Transform is for rendering
@@ -328,6 +347,73 @@ Minifantasy sprites have varying vertical centering. Add offset constants when s
 ```rust
 const CREATURE_SPRITE_OFFSET: f32 = 10.0; // Adjust per sprite
 ```
+
+### Entity Placement via UI
+
+The game features an interactive entity placement system that allows spawning entities by clicking UI buttons and then clicking in the world:
+
+**How to use:**
+1. Click any UI button to select an entity type (Player, Forest Guardian, Snail)
+2. The selected button will highlight with brighter colors and borders
+3. Click anywhere in the game world to spawn the entity at that location
+4. Click the same button again to deselect and stop placing entities
+
+**Implementation pattern:**
+```rust
+// 1. Define PlacementMode resource to track selection
+#[derive(Resource, Default)]
+struct PlacementMode {
+    selected: Option<EntityType>,
+}
+
+// 2. Add EntityType component to UI buttons
+#[derive(Component, Clone)]
+enum EntityType {
+    Player,
+    ForestGuardian(String), // variant name
+    Snail,
+}
+
+// 3. Button click handler toggles selection
+fn button_interaction(
+    trigger: On<Pointer<Click>>,
+    buttons: Query<&EntityType>,
+    mut placement_mode: ResMut<PlacementMode>,
+) {
+    if let Ok(entity_type) = buttons.get(trigger.entity) {
+        if placement_mode.is_selected(entity_type) {
+            placement_mode.deselect();
+        } else {
+            placement_mode.select(entity_type.clone());
+        }
+    }
+}
+
+// 4. Visual feedback system updates button colors
+fn update_button_selection(
+    placement_mode: Res<PlacementMode>,
+    mut buttons: Query<(&EntityType, &mut BackgroundColor, &mut BorderColor)>,
+) {
+    // Highlight selected buttons with brighter colors
+}
+
+// 5. Placement system spawns entities on world clicks
+fn handle_entity_placement(
+    placement_mode: Res<PlacementMode>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    // ... spawn entity at cursor world position
+) {
+    // Convert cursor position to world coordinates
+    // Spawn entity using appropriate spawn function
+}
+```
+
+**Key features:**
+- World position conversion accounts for camera zoom and position via `camera.viewport_to_world_2d()`
+- PlacementMode resource provides centralized state management
+- Visual feedback makes selection clear to the user
+- Toggle behavior prevents accidental continuous placement
 
 ### Tilemap Modification
 

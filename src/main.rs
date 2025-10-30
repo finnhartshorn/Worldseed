@@ -2,6 +2,7 @@ use bevy::{
     input::mouse::MouseWheel,
     prelude::*,
     sprite_render::TilemapChunk,
+    window::PrimaryWindow,
 };
 
 mod entities;
@@ -34,10 +35,48 @@ struct GuardianSubmenu;
 #[derive(Component)]
 struct GuardianButton;
 
+// Entity type identifier for buttons
+#[derive(Component, Clone, Debug)]
+enum EntityType {
+    Player,
+    ForestGuardian(String), // Variant name: "oak", "birch", etc.
+    Snail,
+}
+
+// Placement mode resource - tracks which entity type is selected for placement
+#[derive(Resource, Default, Clone, Debug)]
+struct PlacementMode {
+    selected: Option<EntityType>,
+}
+
+impl PlacementMode {
+    fn select(&mut self, entity_type: EntityType) {
+        self.selected = Some(entity_type);
+    }
+
+    fn deselect(&mut self) {
+        self.selected = None;
+    }
+
+    fn is_selected(&self, entity_type: &EntityType) -> bool {
+        if let Some(ref selected) = self.selected {
+            match (selected, entity_type) {
+                (EntityType::Player, EntityType::Player) => true,
+                (EntityType::Snail, EntityType::Snail) => true,
+                (EntityType::ForestGuardian(a), EntityType::ForestGuardian(b)) => a == b,
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         .init_resource::<WorldManager>()
+        .init_resource::<PlacementMode>()
         .add_systems(Startup, (setup_world, setup_ui))
         .add_systems(
             Update,
@@ -63,6 +102,9 @@ fn main() {
                 // Camera controls
                 move_camera,
                 zoom_camera,
+                // Entity placement
+                handle_entity_placement,
+                update_button_selection,
                 // World management
                 loader::update_camera_chunk,
                 loader::load_chunks_around_camera.after(loader::update_camera_chunk),
@@ -233,6 +275,7 @@ fn setup_ui(
             parent
                 .spawn((
                     Button,
+                    EntityType::Player,
                     Node {
                         width: Val::Px(64.0),
                         height: Val::Px(64.0),
@@ -283,6 +326,7 @@ fn setup_ui(
                     row.spawn((
                         Button,
                         GuardianButton,
+                        EntityType::ForestGuardian("oak".to_string()),
                         Node {
                             width: Val::Px(64.0),
                             height: Val::Px(64.0),
@@ -343,14 +387,16 @@ fn setup_ui(
                         },
                     ))
                     .with_children(|submenu| {
-                        for (_name, filename) in guardians.iter() {
+                        for (name, filename) in guardians.iter() {
                             let texture =
                                 assets.load(format!("creatures/forest_guardians/{}", filename));
                             let layout = texture_atlas_layouts.add(guardian_layout_submenu.clone());
+                            let variant = name.to_lowercase();
 
                             submenu
                                 .spawn((
                                     Button,
+                                    EntityType::ForestGuardian(variant),
                                     Node {
                                         width: Val::Px(64.0),
                                         height: Val::Px(64.0),
@@ -395,6 +441,7 @@ fn setup_ui(
             parent
                 .spawn((
                     Button,
+                    EntityType::Snail,
                     Node {
                         width: Val::Px(64.0),
                         height: Val::Px(64.0),
@@ -454,20 +501,17 @@ fn setup_ui(
 
 fn button_interaction(
     trigger: On<Pointer<Click>>,
-    mut buttons: Query<&mut BackgroundColor, With<Button>>,
+    buttons: Query<&EntityType, With<Button>>,
+    mut placement_mode: ResMut<PlacementMode>,
 ) {
-    if let Ok(mut bg_color) = buttons.get_mut(trigger.entity) {
-        // Toggle button color on click
-        if bg_color.0 == Color::srgb(0.2, 0.2, 0.2) {
-            *bg_color = BackgroundColor(Color::srgb(0.3, 0.3, 0.3));
-        } else if bg_color.0 == Color::srgb(0.2, 0.2, 0.3) {
-            *bg_color = BackgroundColor(Color::srgb(0.3, 0.3, 0.4));
-        } else if bg_color.0 == Color::srgb(0.15, 0.3, 0.15) {
-            *bg_color = BackgroundColor(Color::srgb(0.2, 0.4, 0.2));
-        } else if bg_color.0 == Color::srgb(0.25, 0.2, 0.25) {
-            *bg_color = BackgroundColor(Color::srgb(0.35, 0.3, 0.35));
+    if let Ok(entity_type) = buttons.get(trigger.entity) {
+        // Toggle selection - if already selected, deselect; otherwise select
+        if placement_mode.is_selected(entity_type) {
+            placement_mode.deselect();
+            info!("Deselected entity placement");
         } else {
-            *bg_color = BackgroundColor(Color::srgb(0.2, 0.2, 0.2));
+            placement_mode.select(entity_type.clone());
+            info!("Selected entity type for placement: {:?}", entity_type);
         }
     }
 }
@@ -483,5 +527,115 @@ fn guardian_button_right_click(
         } else {
             Display::None
         };
+    }
+}
+
+/// Updates button visual feedback based on placement mode selection
+fn update_button_selection(
+    placement_mode: Res<PlacementMode>,
+    mut buttons: Query<(&EntityType, &mut BackgroundColor, &mut BorderColor), With<Button>>,
+) {
+    // Only update if placement mode changed
+    if !placement_mode.is_changed() {
+        return;
+    }
+
+    for (entity_type, mut bg_color, mut border_color) in buttons.iter_mut() {
+        let is_selected = placement_mode.is_selected(entity_type);
+
+        // Update colors based on entity type and selection state
+        match entity_type {
+            EntityType::Player => {
+                if is_selected {
+                    *bg_color = BackgroundColor(Color::srgb(0.3, 0.3, 0.5));
+                    *border_color = BorderColor::all(Color::srgb(0.6, 0.6, 1.0));
+                } else {
+                    *bg_color = BackgroundColor(Color::srgb(0.2, 0.2, 0.3));
+                    *border_color = BorderColor::all(Color::srgb(0.4, 0.4, 0.6));
+                }
+            }
+            EntityType::ForestGuardian(_) => {
+                if is_selected {
+                    *bg_color = BackgroundColor(Color::srgb(0.25, 0.5, 0.25));
+                    *border_color = BorderColor::all(Color::srgb(0.5, 1.0, 0.5));
+                } else {
+                    *bg_color = BackgroundColor(Color::srgb(0.15, 0.3, 0.15));
+                    *border_color = BorderColor::all(Color::srgb(0.3, 0.6, 0.3));
+                }
+            }
+            EntityType::Snail => {
+                if is_selected {
+                    *bg_color = BackgroundColor(Color::srgb(0.4, 0.3, 0.4));
+                    *border_color = BorderColor::all(Color::srgb(0.8, 0.6, 0.8));
+                } else {
+                    *bg_color = BackgroundColor(Color::srgb(0.25, 0.2, 0.25));
+                    *border_color = BorderColor::all(Color::srgb(0.5, 0.4, 0.5));
+                }
+            }
+        }
+    }
+}
+
+/// Handles mouse clicks to place entities in the world
+fn handle_entity_placement(
+    placement_mode: Res<PlacementMode>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
+) {
+    // Only handle left clicks when an entity type is selected
+    if !mouse_button.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let Some(ref entity_type) = placement_mode.selected else {
+        return;
+    };
+
+    // Get the primary window
+    let Ok(window) = windows.single() else {
+        return;
+    };
+
+    // Get cursor position in window
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+
+    // Get camera components
+    let Ok((camera, camera_transform, projection)) = camera_query.single() else {
+        return;
+    };
+
+    // Convert cursor position to world position
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        return;
+    };
+
+    // Spawn the entity at the world position
+    let position = Position::new(world_pos.x, world_pos.y);
+
+    match entity_type {
+        EntityType::Player => {
+            spawn_player(&mut commands, position, &assets, &mut texture_atlas_layouts);
+            info!("Spawned player at ({}, {})", world_pos.x, world_pos.y);
+        }
+        EntityType::ForestGuardian(variant) => {
+            spawn_forest_guardian(
+                &mut commands,
+                position,
+                variant,
+                &assets,
+                &mut texture_atlas_layouts,
+            );
+            info!("Spawned {} forest guardian at ({}, {})", variant, world_pos.x, world_pos.y);
+        }
+        EntityType::Snail => {
+            spawn_snail(&mut commands, position, &assets, &mut texture_atlas_layouts);
+            info!("Spawned snail at ({}, {})", world_pos.x, world_pos.y);
+        }
     }
 }
