@@ -37,8 +37,11 @@ pub fn update_map_display(
     assets: Res<AssetServer>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
-    // Only update when map becomes visible
-    if !map_state.is_changed() || !map_state.visible {
+    // Update when map is visible AND (map state changed OR world changed)
+    let should_update = map_state.visible &&
+        (map_state.is_changed() || world_manager.is_changed());
+
+    if !should_update {
         return;
     }
 
@@ -115,7 +118,7 @@ pub fn update_map_display(
         // Add map legend/info
         parent.spawn((
             Text::new(format!(
-                "Map Coverage: {} tiles | Chunks per tile: {} | Terrain-aware rendering (Grass/Dirt)",
+                "Map Coverage: {} tiles | Chunks per tile: {} | Real-time terrain updates",
                 map_tiles.len(),
                 map_config.chunks_per_map_tile
             )),
