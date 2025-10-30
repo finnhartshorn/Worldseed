@@ -138,8 +138,60 @@ impl Health {
 pub struct Player;
 
 /// Marker component for forest guardian creatures
-#[derive(Component)]
-pub struct ForestGuardian;
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ForestGuardian {
+    /// The tree variant this guardian is associated with
+    pub variant: TreeVariant,
+}
+
+impl ForestGuardian {
+    pub fn new(variant: TreeVariant) -> Self {
+        Self { variant }
+    }
+}
+
+/// Component for entities that periodically spawn trees
+#[derive(Component, Debug, Clone, Copy)]
+pub struct TreeSpawner {
+    /// Time until next tree spawn (seconds)
+    pub spawn_timer: f32,
+    /// Minimum time between spawns (seconds)
+    pub min_spawn_interval: f32,
+    /// Maximum time between spawns (seconds)
+    pub max_spawn_interval: f32,
+    /// Maximum distance from spawner to place trees (pixels)
+    pub spawn_radius: f32,
+    /// Growth time per stage for spawned trees (seconds)
+    pub tree_growth_time: f32,
+}
+
+impl TreeSpawner {
+    /// Create a new tree spawner with default settings
+    pub fn new(min_interval: f32, max_interval: f32, spawn_radius: f32, tree_growth_time: f32) -> Self {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hash, Hasher};
+
+        // Generate initial random spawn timer
+        let hasher_builder = RandomState::new();
+        let mut hasher = hasher_builder.build_hasher();
+        std::time::SystemTime::now().hash(&mut hasher);
+        let hash = hasher.finish();
+        let rand_val = (hash as f32) / (u64::MAX as f32);
+
+        Self {
+            spawn_timer: min_interval + rand_val * (max_interval - min_interval),
+            min_spawn_interval: min_interval,
+            max_spawn_interval: max_interval,
+            spawn_radius,
+            tree_growth_time,
+        }
+    }
+
+    /// Default settings for forest guardians (spawn every 10-30 seconds)
+    pub fn default_guardian() -> Self {
+        Self::new(10.0, 30.0, 80.0, 5.0)
+    }
+}
 
 /// Marker component for snail creatures
 #[derive(Component)]
@@ -236,6 +288,36 @@ impl TreeVariant {
             TreeVariant::Pine => "pine",
             TreeVariant::Willow => "willow",
         }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "oak" => TreeVariant::Oak,
+            "birch" => TreeVariant::Birch,
+            "hickory" => TreeVariant::Hickory,
+            "pine" => TreeVariant::Pine,
+            "willow" => TreeVariant::Willow,
+            _ => TreeVariant::Oak, // Default to oak
+        }
+    }
+
+    /// Get a random variant different from this one
+    pub fn random_other(&self, rand_val: f32) -> Self {
+        // Get all variants except the current one
+        let others: Vec<TreeVariant> = [
+            TreeVariant::Oak,
+            TreeVariant::Birch,
+            TreeVariant::Hickory,
+            TreeVariant::Pine,
+            TreeVariant::Willow,
+        ]
+        .into_iter()
+        .filter(|v| v != self)
+        .collect();
+
+        // Pick one based on random value (0.0 to 1.0)
+        let index = ((rand_val * others.len() as f32) as usize).min(others.len() - 1);
+        others[index]
     }
 }
 

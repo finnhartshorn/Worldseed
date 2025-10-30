@@ -1,6 +1,6 @@
 use bevy::prelude::*;
-use super::{Position, Velocity, Direction, EntityState, AnimationIndices, WindingPath, RoamingBehavior, Snail, GrowingTree, TreeSpirit};
-use super::spawning::{AnimationTimer, update_animation_for_direction};
+use super::{Position, Velocity, Direction, EntityState, AnimationIndices, WindingPath, RoamingBehavior, Snail, GrowingTree, TreeSpirit, TreeSpawner, TreeVariant, ForestGuardian};
+use super::spawning::{AnimationTimer, update_animation_for_direction, spawn_tree_spirit};
 use crate::world::WorldManager;
 use crate::tiles::TILE_DIRT;
 
@@ -303,6 +303,120 @@ pub fn update_tree_growth(
                     next_stage, new_scale
                 );
             }
+        }
+    }
+}
+
+/// Spawns trees around entities with TreeSpawner component
+pub fn update_tree_spawning(
+    time: Res<Time>,
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
+    mut spawner_query: Query<(&Position, &mut TreeSpawner, Option<&ForestGuardian>)>,
+) {
+    use std::f32::consts::PI;
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+
+    let delta = time.delta_secs();
+
+    for (position, mut spawner, guardian) in spawner_query.iter_mut() {
+        // Count down spawn timer
+        spawner.spawn_timer -= delta;
+
+        // Check if it's time to spawn a tree
+        if spawner.spawn_timer <= 0.0 {
+            // Generate random values using hash
+            let hasher_builder = RandomState::new();
+            let mut hasher = hasher_builder.build_hasher();
+            position.x.to_bits().hash(&mut hasher);
+            position.y.to_bits().hash(&mut hasher);
+            std::time::SystemTime::now().hash(&mut hasher);
+            let hash = hasher.finish();
+
+            // Random angle for tree placement
+            let rand_angle = ((hash as f32) / (u64::MAX as f32)) * 2.0 * PI;
+
+            // Random distance within spawn radius
+            let mut hasher2 = hasher_builder.build_hasher();
+            (hash.wrapping_add(1)).hash(&mut hasher2);
+            let hash2 = hasher2.finish();
+            let rand_distance = ((hash2 as f32) / (u64::MAX as f32)) * spawner.spawn_radius;
+
+            // Calculate spawn position
+            let spawn_x = position.x + rand_angle.cos() * rand_distance;
+            let spawn_y = position.y + rand_angle.sin() * rand_distance;
+
+            // Determine tree variant based on guardian variant (if present)
+            let tree_variant = if let Some(guardian) = guardian {
+                // Generate random value for variant selection
+                let mut hasher3 = hasher_builder.build_hasher();
+                (hash2.wrapping_add(1)).hash(&mut hasher3);
+                let hash3 = hasher3.finish();
+                let rand_variant = (hash3 as f32) / (u64::MAX as f32);
+
+                if rand_variant < 0.95 {
+                    // 95% chance: spawn matching variant
+                    guardian.variant
+                } else {
+                    // 5% chance: spawn different variant
+                    let mut hasher4 = hasher_builder.build_hasher();
+                    (hash3.wrapping_add(1)).hash(&mut hasher4);
+                    let hash4 = hasher4.finish();
+                    let rand_other = (hash4 as f32) / (u64::MAX as f32);
+                    guardian.variant.random_other(rand_other)
+                }
+            } else {
+                // No guardian component, pick fully random variant
+                let mut hasher3 = hasher_builder.build_hasher();
+                (hash2.wrapping_add(1)).hash(&mut hasher3);
+                let hash3 = hasher3.finish();
+                let variant_index = (hash3 % 5) as usize;
+                match variant_index {
+                    0 => TreeVariant::Oak,
+                    1 => TreeVariant::Birch,
+                    2 => TreeVariant::Hickory,
+                    3 => TreeVariant::Pine,
+                    _ => TreeVariant::Willow,
+                }
+            };
+
+            // Spawn the tree
+            spawn_tree_spirit(
+                &mut commands,
+                Position::new(spawn_x, spawn_y),
+                tree_variant,
+                spawner.tree_growth_time,
+                &assets,
+                &mut texture_atlas_layouts,
+            );
+
+            if let Some(guardian) = guardian {
+                let is_matching = tree_variant == guardian.variant;
+                info!(
+                    "{:?} guardian spawned {:?} tree at ({:.1}, {:.1}) {}",
+                    guardian.variant,
+                    tree_variant,
+                    spawn_x,
+                    spawn_y,
+                    if is_matching { "(matching)" } else { "(different!)" }
+                );
+            } else {
+                info!(
+                    "Entity spawned {:?} tree at ({:.1}, {:.1})",
+                    tree_variant, spawn_x, spawn_y
+                );
+            }
+
+            // Reset spawn timer with random interval
+            let mut hasher_interval = hasher_builder.build_hasher();
+            position.x.to_bits().hash(&mut hasher_interval);
+            std::time::SystemTime::now().hash(&mut hasher_interval);
+            let hash_interval = hasher_interval.finish();
+            let rand_interval = (hash_interval as f32) / (u64::MAX as f32);
+            spawner.spawn_timer = spawner.min_spawn_interval
+                + rand_interval * (spawner.max_spawn_interval - spawner.min_spawn_interval);
         }
     }
 }

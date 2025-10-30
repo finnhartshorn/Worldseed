@@ -1,4 +1,4 @@
-use super::{Direction, EntityBundle, ForestGuardian, Player, Position, Snail, WindingPath, RoamingBehavior, TreeSpirit, GrowingTree, TreeVariant};
+use super::{Direction, EntityBundle, ForestGuardian, Player, Position, Snail, WindingPath, RoamingBehavior, TreeSpirit, GrowingTree, TreeVariant, TreeSpawner};
 use bevy::prelude::*;
 
 /// Animation components
@@ -67,11 +67,14 @@ pub fn spawn_forest_guardian(
     let layout = TextureAtlasLayout::from_grid(UVec2::splat(32), 8, 4, None, None);
     let texture_atlas_layout = texture_atlas_layouts.add(layout);
 
+    let tree_variant = TreeVariant::from_str(variant);
+
     commands
         .spawn((
-            ForestGuardian,
+            ForestGuardian::new(tree_variant),
             EntityBundle::new(position.x, position.y, 150.0),
             RoamingBehavior::new(position, 100.0, 15.0), // Roam within 100px at 15px/s
+            TreeSpawner::default_guardian(), // Spawn trees periodically
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {

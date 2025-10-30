@@ -12,7 +12,7 @@ use entities::{
     animate_sprite, apply_velocity, snail_dirt_trail, spawn_forest_guardian, spawn_player,
     spawn_snail, spawn_tree_spirit, sync_position_with_transform, update_animation_from_direction,
     update_direction_from_velocity, update_roaming_behavior, update_state_from_velocity,
-    update_tree_growth, update_winding_path, Position, TreeVariant,
+    update_tree_growth, update_tree_spawning, update_winding_path, Position, TreeVariant,
 };
 use world::{loader, WorldManager};
 
@@ -55,7 +55,8 @@ fn main() {
                 sync_position_with_transform.after(apply_velocity),
                 // Entity interactions with world
                 snail_dirt_trail.after(sync_position_with_transform),
-                // Tree growth
+                // Tree spawning and growth
+                update_tree_spawning,
                 update_tree_growth,
                 // Animation
                 animate_sprite,

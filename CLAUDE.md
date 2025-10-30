@@ -431,6 +431,48 @@ spawn_tree_spirit(commands, pos, TreeVariant::Pine, 10.0, assets, layouts);
 - Easy to add growth stages by extending `GrowthStage` enum
 - Pattern can be adapted for other growing entities (crops, buildings, etc.)
 
+### Tree Spawning System
+
+Entities can periodically spawn trees using the `TreeSpawner` component:
+
+```rust
+// Forest guardians automatically spawn trees when created
+spawn_forest_guardian(&mut commands, Position::new(-100.0, 0.0), "oak", &assets, &mut layouts);
+```
+
+**How it works:**
+1. Entities with `TreeSpawner` component have configurable spawn intervals and radius
+2. `update_tree_spawning` system counts down spawn timers
+3. When timer reaches zero:
+   - Picks random position within spawn radius (default 80px for guardians)
+   - If entity has `ForestGuardian` component:
+     - 95% chance: spawns matching tree variant (oak guardian → oak tree)
+     - 5% chance: spawns random different variant
+   - Otherwise: picks fully random variant
+   - Spawns tree using `spawn_tree_spirit()`
+   - Resets timer with new random interval (10-30 seconds for guardians)
+4. Spawned trees automatically grow through stages (see Tree Growth System above)
+
+**TreeSpawner Configuration:**
+```rust
+// Default guardian settings
+TreeSpawner::default_guardian()  // 10-30s interval, 80px radius, 5s growth time
+
+// Custom spawner
+TreeSpawner::new(
+    min_interval: 5.0,    // Minimum 5 seconds between spawns
+    max_interval: 15.0,   // Maximum 15 seconds between spawns
+    spawn_radius: 50.0,   // Spawn within 50 pixels
+    tree_growth_time: 3.0 // 3 seconds per growth stage
+)
+```
+
+**Forest Guardian Tree Matching:**
+- Oak guardians primarily spawn oak trees (95%), occasionally other variants (5%)
+- Birch guardians primarily spawn birch trees (95%), occasionally other variants (5%)
+- Same pattern for Hickory, Pine, and Willow guardians
+- This creates natural "groves" around each guardian while allowing some variety
+
 ## Bevy 0.17 Specifics
 
 - Uses new `sprite_render` module for tilemaps (`TilemapChunk`, `TilemapChunkTileData`, `TileData`)
