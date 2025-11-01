@@ -41,6 +41,7 @@ pub fn load_chunks_around_camera(
 
     // Get chunks that should be loaded
     let chunks_to_load = camera_chunk.chunks_in_radius(load_radius);
+    #[cfg(feature = "debug_chunks")]
     let has_loaded_chunks = !chunks_to_load.is_empty();
 
     for chunk_pos in chunks_to_load {
@@ -107,6 +108,7 @@ pub fn load_chunks_around_camera(
     }
 
     // Print chunk grid after loading
+    #[cfg(feature = "debug_chunks")]
     if has_loaded_chunks {
         let visible_chunks = calculate_visible_chunks(&camera_query, &window_query);
         print_chunk_grid(&world, camera_chunk, visible_chunks, load_radius);
@@ -140,6 +142,7 @@ pub fn unload_distant_chunks(
     }
 
     // Unload chunks
+    #[cfg(feature = "debug_chunks")]
     let has_unloaded_chunks = !chunks_to_unload.is_empty();
 
     for (entity, chunk_pos) in chunks_to_unload {
@@ -172,6 +175,7 @@ pub fn unload_distant_chunks(
     }
 
     // Print chunk grid after unloading
+    #[cfg(feature = "debug_chunks")]
     if has_unloaded_chunks {
         let visible_chunks = calculate_visible_chunks(&camera_query, &window_query);
         print_chunk_grid(&world, camera_chunk, visible_chunks, load_radius);
@@ -258,6 +262,7 @@ pub fn apply_tile_modifications(
 }
 
 /// Calculate which chunks are visible in the camera viewport
+#[cfg(feature = "debug_chunks")]
 fn calculate_visible_chunks(
     camera_query: &Query<(&Transform, &Projection), With<Camera2d>>,
     window_query: &Query<&Window>,
@@ -352,6 +357,7 @@ fn calculate_unload_radius(load_radius: i32) -> i32 {
 }
 
 /// Print a visual representation of loaded chunks
+#[cfg(feature = "debug_chunks")]
 fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos, visible_chunks: HashSet<ChunkPos>, load_radius: i32) {
     // Determine the range to display (show area around camera)
     // Use load_radius + 1 to show chunks just outside the load area
