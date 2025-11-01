@@ -585,6 +585,7 @@ fn handle_entity_placement(
     mouse_button: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
+    ui_query: Query<&Interaction, With<Button>>,
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
@@ -597,6 +598,13 @@ fn handle_entity_placement(
     let Some(ref entity_type) = placement_mode.selected else {
         return;
     };
+
+    // Don't spawn entities if cursor is over any UI element
+    for interaction in ui_query.iter() {
+        if *interaction == Interaction::Pressed || *interaction == Interaction::Hovered {
+            return;
+        }
+    }
 
     // Get the primary window
     let Ok(window) = windows.single() else {

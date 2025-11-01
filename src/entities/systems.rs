@@ -1,8 +1,11 @@
-use bevy::prelude::*;
-use super::{Position, Velocity, Direction, EntityState, AnimationIndices, WindingPath, RoamingBehavior, Snail, GrowingTree, TreeSpirit, TreeSpawner, TreeVariant, ForestGuardian};
-use super::spawning::{AnimationTimer, update_animation_for_direction, spawn_tree_spirit};
-use crate::world::WorldManager;
+use super::spawning::{spawn_tree_spirit, update_animation_for_direction, AnimationTimer};
+use super::{
+    AnimationIndices, Direction, EntityState, ForestGuardian, GrowingTree, Position,
+    RoamingBehavior, Snail, TreeSpawner, TreeSpirit, TreeVariant, Velocity, WindingPath,
+};
 use crate::tiles::TILE_DIRT;
+use crate::world::WorldManager;
+use bevy::prelude::*;
 
 /// Syncs entity Position component with Transform for rendering
 pub fn sync_position_with_transform(
@@ -15,10 +18,7 @@ pub fn sync_position_with_transform(
 }
 
 /// Updates entity position based on velocity
-pub fn apply_velocity(
-    time: Res<Time>,
-    mut query: Query<(&mut Position, &Velocity)>,
-) {
+pub fn apply_velocity(time: Res<Time>, mut query: Query<(&mut Position, &Velocity)>) {
     let delta = time.delta_secs();
     for (mut position, velocity) in &mut query {
         position.x += velocity.x * delta;
@@ -39,12 +39,10 @@ pub fn update_direction_from_velocity(
 }
 
 /// Updates entity state based on velocity
-pub fn update_state_from_velocity(
-    mut query: Query<(&Velocity, &mut EntityState)>,
-) {
+pub fn update_state_from_velocity(mut query: Query<(&Velocity, &mut EntityState)>) {
     for (velocity, mut state) in &mut query {
         match *state {
-            EntityState::Dead => continue, // Dead entities don't change state
+            EntityState::Dead => continue,      // Dead entities don't change state
             EntityState::Attacking => continue, // Don't interrupt attacking
             _ => {
                 if velocity.magnitude() > 0.1 {
@@ -99,8 +97,8 @@ pub fn update_roaming_behavior(
     time: Res<Time>,
     mut query: Query<(&Position, &mut Velocity, &mut RoamingBehavior)>,
 ) {
-    use std::f32::consts::PI;
     use std::collections::hash_map::RandomState;
+    use std::f32::consts::PI;
     use std::hash::{BuildHasher, Hash, Hasher};
     let delta = time.delta_secs();
 
@@ -174,12 +172,9 @@ pub fn update_roaming_behavior(
 
 /// Updates velocity for entities with winding path behavior
 /// This creates smooth, meandering movement with long straight sections
-pub fn update_winding_path(
-    time: Res<Time>,
-    mut query: Query<(&mut Velocity, &mut WindingPath)>,
-) {
-    use std::f32::consts::PI;
+pub fn update_winding_path(time: Res<Time>, mut query: Query<(&mut Velocity, &mut WindingPath)>) {
     use std::collections::hash_map::RandomState;
+    use std::f32::consts::PI;
     use std::hash::{BuildHasher, Hash, Hasher};
     let delta = time.delta_secs();
 
@@ -233,7 +228,8 @@ pub fn update_winding_path(
         };
 
         // Apply turn rate
-        let turn_amount = (angle_diff.signum() * path.turn_rate * delta).clamp(-angle_diff.abs(), angle_diff.abs());
+        let turn_amount = (angle_diff.signum() * path.turn_rate * delta)
+            .clamp(-angle_diff.abs(), angle_diff.abs());
         path.current_angle += turn_amount;
 
         // Normalize current angle to [0, 2π]
@@ -250,9 +246,9 @@ pub fn snail_dirt_trail(
     mut world: ResMut<WorldManager>,
     snail_query: Query<&Position, (With<Snail>, Changed<Position>)>,
 ) {
+    use crate::tiles::LAYER_GROUND;
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hash, Hasher};
-    use crate::tiles::LAYER_GROUND;
 
     for position in snail_query.iter() {
         // Generate a random number using hash of position and time
@@ -265,6 +261,11 @@ pub fn snail_dirt_trail(
         let rand_val = (hash as f32) / (u64::MAX as f32);
 
         // 20% chance to turn tile into dirt on the ground layer
+        // Log random value for debugging
+        info!(
+            "Snail at ({:.1}, {:.1}) random value: {:.3}",
+            position.x, position.y, rand_val
+        );
         if rand_val < 0.2 {
             world.queue_tile_modification(position.x, position.y, TILE_DIRT, LAYER_GROUND);
         }
@@ -315,8 +316,8 @@ pub fn update_tree_spawning(
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut spawner_query: Query<(&Position, &mut TreeSpawner, Option<&ForestGuardian>)>,
 ) {
-    use std::f32::consts::PI;
     use std::collections::hash_map::RandomState;
+    use std::f32::consts::PI;
     use std::hash::{BuildHasher, Hash, Hasher};
 
     let delta = time.delta_secs();
@@ -400,7 +401,11 @@ pub fn update_tree_spawning(
                     tree_variant,
                     spawn_x,
                     spawn_y,
-                    if is_matching { "(matching)" } else { "(different!)" }
+                    if is_matching {
+                        "(matching)"
+                    } else {
+                        "(different!)"
+                    }
                 );
             } else {
                 info!(
@@ -423,9 +428,7 @@ pub fn update_tree_spawning(
 
 /// Debug system to print entity information
 #[allow(dead_code)]
-pub fn debug_entities(
-    query: Query<(Entity, &Position, &Velocity, &Direction, &EntityState)>,
-) {
+pub fn debug_entities(query: Query<(Entity, &Position, &Velocity, &Direction, &EntityState)>) {
     for (entity, position, velocity, direction, state) in &query {
         info!(
             "Entity {:?}: pos=({:.1}, {:.1}), vel=({:.1}, {:.1}), dir={:?}, state={:?}",
