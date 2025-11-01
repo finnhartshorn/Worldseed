@@ -3,6 +3,7 @@ use bevy::{
     prelude::*,
     sprite_render::TilemapChunk,
     window::PrimaryWindow,
+    picking::pointer::PointerButton,
 };
 
 mod entities;
@@ -504,12 +505,51 @@ fn setup_ui(
 
 fn button_interaction(
     trigger: On<Pointer<Click>>,
-    buttons: Query<&EntityType, With<Button>>,
+    mut param_set: ParamSet<(
+        Query<(&EntityType, Option<&GuardianButton>), With<Button>>,
+        Query<(&mut EntityType, &Children), With<GuardianButton>>,
+    )>,
     mut placement_mode: ResMut<PlacementMode>,
+    mut submenu_query: Query<&mut Node, With<GuardianSubmenu>>,
+    mut image_query: Query<&mut ImageNode>,
+    assets: Res<AssetServer>,
 ) {
-    if let Ok(entity_type) = buttons.get(trigger.entity) {
+    // First, get the clicked button's info
+    let button_info = param_set.p0().get(trigger.entity).ok().map(|(et, gb)| (et.clone(), gb.is_none()));
+
+    if let Some((entity_type, is_not_main_guardian)) = button_info {
+        // Check if this is a guardian variant from the submenu (not the main guardian button)
+        let is_submenu_guardian = matches!(entity_type, EntityType::ForestGuardian(_)) && is_not_main_guardian;
+
+        if is_submenu_guardian {
+            // Guardian variant selected from submenu - close menu and update main button
+            if let Ok(mut submenu_node) = submenu_query.single_mut() {
+                submenu_node.display = Display::None;
+            }
+
+            // Update the main guardian button's EntityType and icon
+            if let Ok((mut guardian_entity_type, children)) = param_set.p1().single_mut() {
+                *guardian_entity_type = entity_type.clone();
+
+                // Update the icon texture
+                if let EntityType::ForestGuardian(variant) = &entity_type {
+                    let texture_path = format!("creatures/forest_guardians/{}_guardian_idle.png", variant);
+                    let new_texture = assets.load(&texture_path);
+
+                    // Find and update the child ImageNode
+                    for child in children {
+                        if let Ok(mut image_node) = image_query.get_mut(*child) {
+                            image_node.image = new_texture.clone();
+                            info!("Updated guardian button icon to {} variant", variant);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // Toggle selection - if already selected, deselect; otherwise select
-        if placement_mode.is_selected(entity_type) {
+        if placement_mode.is_selected(&entity_type) {
             placement_mode.deselect();
             info!("Deselected entity placement");
         } else {
@@ -520,9 +560,14 @@ fn button_interaction(
 }
 
 fn guardian_button_right_click(
-    _trigger: On<Pointer<Click>>,
+    trigger: On<Pointer<Click>>,
     mut submenu_query: Query<&mut Node, With<GuardianSubmenu>>,
 ) {
+    // Only respond to right-click (Secondary button)
+    if trigger.event().button != PointerButton::Secondary {
+        return;
+    }
+
     // Toggle submenu visibility
     if let Ok(mut node) = submenu_query.single_mut() {
         node.display = if node.display == Display::None {

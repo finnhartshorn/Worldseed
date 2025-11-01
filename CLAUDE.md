@@ -105,7 +105,12 @@ The codebase is organized into modules:
 4. **UI System** (`setup_ui`, `button_interaction`, `guardian_button_right_click`)
    - Left-side vertical button panel using Bevy UI nodes
    - Buttons display creature sprites with custom offsets for proper centering
-   - Guardian button has expandable submenu showing 5 guardian variants
+   - **Guardian button submenu** (expandable variant selector):
+     - Right-click guardian button to expand/collapse submenu showing 5 guardian variants
+     - Left-click any variant to select it for placement and auto-close the submenu
+     - Main button icon dynamically updates to show the currently selected variant
+     - Uses `ParamSet` to handle concurrent query access to `EntityType` component
+     - Button texture updates via `ImageNode.image` field reassignment
    - UI sprites require vertical offset constants (see `*_SPRITE_OFFSET` constants)
    - **Entity Placement System**: Interactive entity spawning via UI
      - `PlacementMode` resource tracks selected entity type for placement
@@ -670,8 +675,18 @@ To add new terrain types:
 - `ImageNode` component for UI sprites (replaces old `UiImage`)
   - **Important**: `TextureAtlas` goes inside `ImageNode.texture_atlas` field (not as separate component)
   - Pattern: `ImageNode { image: handle, texture_atlas: Some(TextureAtlas { ... }), ... }`
+  - Dynamic texture updates: Reassign `ImageNode.image` field to change displayed texture
 - `Node` component for UI layout (replaces old `Style`)
 - UI Grid layout: Use `Display::Grid` with `grid_template_columns` and `grid_template_rows` vectors
+- **ParamSet for query conflicts**: When a system needs both immutable and mutable access to the same component
+  - Use `ParamSet<(Query1, Query2)>` to resolve conflicts
+  - Access queries via `.p0()`, `.p1()`, etc.
+  - Example: `ParamSet<(Query<&EntityType>, Query<&mut EntityType>)>`
+  - Pattern ensures only one query is active at a time, preventing conflicts
+- **Pointer events**: Use `bevy::picking::pointer::PointerButton` to check click types
+  - `PointerButton::Primary` - Left mouse button
+  - `PointerButton::Secondary` - Right mouse button
+  - Access via `trigger.event().button` in observer systems
 
 ## Asset References
 
