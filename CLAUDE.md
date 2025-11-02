@@ -102,7 +102,7 @@ The codebase is organized into modules:
    - Timers control animation speed per entity
    - Generic system handles all animated sprites automatically
 
-4. **UI System** (`setup_ui`, `button_interaction`, `guardian_button_right_click`)
+4. **UI System** (`setup_ui`, `button_interaction`, `guardian_button_right_click`, `terrain_button_interaction`, `terrain_button_right_click`)
    - Left-side vertical button panel using Bevy UI nodes
    - Buttons display creature sprites with custom offsets for proper centering
    - **Guardian button submenu** (expandable variant selector):
@@ -111,6 +111,12 @@ The codebase is organized into modules:
      - Main button icon dynamically updates to show the currently selected variant
      - Uses `ParamSet` to handle concurrent query access to `EntityType` component
      - Button texture updates via `ImageNode.image` field reassignment
+   - **Terrain button submenu** (expandable terrain type selector):
+     - Right-click terrain button to expand/collapse submenu showing grass and dirt options
+     - Left-click any terrain type to select it for painting and auto-close the submenu
+     - Main button icon dynamically updates to show the currently selected terrain type
+     - Uses separate UI texture file (`terrain_array_ui.png`) to avoid WebGPU dimension conflicts
+     - Texture atlas indices: 0 = grass, 1 = dirt (maps to TILE_GRASS=1, TILE_DIRT=2 in world)
    - UI sprites require vertical offset constants (see `*_SPRITE_OFFSET` constants)
    - **Entity Placement System**: Interactive entity spawning via UI
      - `PlacementMode` resource tracks selected entity type for placement
@@ -120,6 +126,14 @@ The codebase is organized into modules:
      - Buttons toggle selection on/off (click to select, click again to deselect)
      - World position conversion accounts for camera zoom and position
      - Selected buttons highlight with brighter colors and borders
+   - **Terrain Painting System**: Interactive terrain modification via UI
+     - `PaintMode` resource tracks selected terrain type for painting
+     - `TerrainType` component on buttons identifies terrain: Grass, Dirt
+     - `update_terrain_button_selection` system provides visual feedback (highlight selected buttons)
+     - `handle_terrain_painting` system paints terrain at mouse click positions on ground layer
+     - Selecting terrain deselects entity placement and vice versa (mutually exclusive modes)
+     - Uses `WorldManager.queue_tile_modification()` to apply terrain changes
+     - Changes persist through chunk unload/reload via serialization
 
 5. **World Management System** (`world/` module)
    - `loader.rs` - Dynamic chunk loading/unloading based on camera position and zoom
@@ -204,13 +218,15 @@ Update systems run in this order:
 6. `animate_sprite` - Cycle through animation frames
 7. `move_camera` - Handle camera movement input
 8. `zoom_camera` - Handle zoom input
-9. **Entity placement** (UI interaction systems):
+9. **Entity placement and terrain painting** (UI interaction systems):
    - `handle_entity_placement` - Spawn entities at mouse cursor position
-   - `update_button_selection` - Update button visual feedback based on selection
+   - `handle_terrain_painting` - Paint terrain tiles at mouse cursor position
+   - `update_button_selection` - Update entity button visual feedback based on selection
+   - `update_terrain_button_selection` - Update terrain button visual feedback based on selection
 10. `update_camera_chunk` - Track which chunk camera is in
 11. `load_chunks_around_camera` - Load chunks in radius (after camera update)
 12. `unload_distant_chunks` - Unload far chunks (after loading)
-13. `apply_tile_modifications` - Apply queued tile changes to cache and visuals
+13. `apply_tile_modifications` - Apply queued tile changes to cache and visuals (after terrain painting)
 
 **Critical orderings:**
 - AI behaviors run before velocity application to set movement intent
@@ -237,6 +253,15 @@ Update systems run in this order:
 - Methods: `select()`, `deselect()`, `is_selected()`
 - Initialized at startup with `init_resource::<PlacementMode>()`
 - Updated by button click interactions, drives entity spawning on mouse clicks
+- Mutually exclusive with PaintMode (selecting terrain deselects entities)
+
+**PaintMode** (`main.rs`)
+- Tracks currently selected terrain type for UI-based terrain painting
+- Holds `Option<TerrainType>` where TerrainType is Grass or Dirt
+- Methods: `select()`, `deselect()`, `is_selected()`
+- Initialized at startup with `init_resource::<PaintMode>()`
+- Updated by terrain button click interactions, drives terrain modification on mouse clicks
+- Mutually exclusive with PlacementMode (selecting entities deselects terrain)
 
 ### Entity Organization
 
@@ -249,8 +274,9 @@ Update systems run in this order:
 
 **Marker Components**:
 - Entity types (in `entities/types.rs`): `Player`, `ForestGuardian`, `Snail`, `TreeSpirit`
-- UI components (in `main.rs`): `GuardianSubmenu`, `GuardianButton`, `EntityType`
+- UI components (in `main.rs`): `GuardianSubmenu`, `GuardianButton`, `TerrainSubmenu`, `TerrainButton`, `EntityType`, `TerrainType`
   - `EntityType` enum identifies button entity types: Player, ForestGuardian(variant), Snail
+  - `TerrainType` enum identifies terrain painting types: Grass, Dirt
 
 **Key Design Principles:**
 - `Position` is separate from `Transform` - Position is for game logic, Transform is for rendering
@@ -275,7 +301,8 @@ assets/
 ├── maps/              # World map cartographic tiles
 │   └── Minifantasy_MapsLandAndSea.png (216×88 pixels = 27×11 tiles at 8×8)
 └── tilesets/
-    └── terrain_array.png (8×16 stacked tiles)
+    ├── terrain_array.png (8×16 stacked tiles) - Used by tilemap chunks, reinterpreted as 2D array
+    └── terrain_array_ui.png (8×16 stacked tiles) - Duplicate for UI, stays as 2D texture
 ```
 
 ### Sprite Sheet Specifications
@@ -450,6 +477,79 @@ fn handle_entity_placement(
 - PlacementMode resource provides centralized state management
 - Visual feedback makes selection clear to the user
 - Toggle behavior prevents accidental continuous placement
+
+### Terrain Painting via UI
+
+The game features an interactive terrain painting system that allows modifying terrain by clicking UI buttons and then clicking in the world:
+
+**How to use:**
+1. Right-click the terrain button to expand the submenu showing grass and dirt options
+2. Click a terrain type to select it for painting
+3. The main terrain button icon updates to show the selected terrain type
+4. Click anywhere in the game world to paint that terrain tile at the clicked location
+5. Click the terrain button again to deselect and stop painting
+
+**Implementation pattern:**
+```rust
+// 1. Define PaintMode resource to track terrain selection
+#[derive(Resource, Default)]
+struct PaintMode {
+    selected: Option<TerrainType>,
+}
+
+// 2. Add TerrainType component to UI buttons
+#[derive(Component, Clone, PartialEq)]
+enum TerrainType {
+    Grass,
+    Dirt,
+}
+
+// 3. Terrain button click handler toggles selection
+fn terrain_button_interaction(
+    trigger: On<Pointer<Click>>,
+    buttons: Query<&TerrainType>,
+    mut paint_mode: ResMut<PaintMode>,
+    mut placement_mode: ResMut<PlacementMode>,
+) {
+    if let Ok(terrain_type) = buttons.get(trigger.entity) {
+        placement_mode.deselect(); // Mutually exclusive with entity placement
+        if paint_mode.is_selected(terrain_type) {
+            paint_mode.deselect();
+        } else {
+            paint_mode.select(terrain_type.clone());
+        }
+    }
+}
+
+// 4. Painting system modifies terrain on world clicks
+fn handle_terrain_painting(
+    paint_mode: Res<PaintMode>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    mut world_manager: ResMut<WorldManager>,
+) {
+    // Convert cursor position to world coordinates
+    // Queue tile modification on ground layer
+    let tile_id = match paint_mode.selected {
+        Some(TerrainType::Grass) => TILE_GRASS,
+        Some(TerrainType::Dirt) => TILE_DIRT,
+        None => return,
+    };
+    world_manager.queue_tile_modification(world_x, world_y, tile_id, LAYER_GROUND);
+}
+```
+
+**Key features:**
+- Mutually exclusive with entity placement (selecting terrain deselects entities and vice versa)
+- Uses `WorldManager.queue_tile_modification()` for proper chunk updating and persistence
+- Terrain changes persist through chunk unload/reload via serialization
+- Main button icon updates dynamically via texture atlas index changes
+
+**Texture Atlas Mapping:**
+- UI uses `terrain_array_ui.png` (separate file to avoid WebGPU dimension conflicts)
+- Atlas indices: 0 = grass, 1 = dirt
+- World tile IDs: TILE_GRASS = 1, TILE_DIRT = 2
+- Tilemap chunks use `terrain_array.png` which gets reinterpreted as 2D array texture
 
 ### Tilemap Modification
 
