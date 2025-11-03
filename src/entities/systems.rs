@@ -260,12 +260,6 @@ pub fn snail_dirt_trail(
         let hash = hasher.finish();
         let rand_val = (hash as f32) / (u64::MAX as f32);
 
-        // 20% chance to turn tile into dirt on the ground layer
-        // Log random value for debugging
-        info!(
-            "Snail at ({:.1}, {:.1}) random value: {:.3}",
-            position.x, position.y, rand_val
-        );
         if rand_val < 0.2 {
             world.queue_tile_modification(position.x, position.y, TILE_DIRT, LAYER_GROUND);
         }

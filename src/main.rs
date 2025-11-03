@@ -18,6 +18,7 @@ use entities::{
     update_tree_growth, update_tree_spawning, update_winding_path, Position, TreeVariant,
 };
 use map::MapPlugin;
+use tiles::constants::{LAYER_GROUND, TILE_DIRT, TILE_GRASS};
 use world::{loader, WorldManager};
 
 // UI sprite vertical offsets for proper centering
@@ -38,12 +39,25 @@ struct GuardianSubmenu;
 #[derive(Component)]
 struct GuardianButton;
 
+#[derive(Component)]
+struct TerrainSubmenu;
+
+#[derive(Component)]
+struct TerrainButton;
+
 // Entity type identifier for buttons
 #[derive(Component, Clone, Debug)]
 enum EntityType {
     Player,
     ForestGuardian(String), // Variant name: "oak", "birch", etc.
     Snail,
+}
+
+// Terrain type identifier for terrain painting
+#[derive(Component, Clone, Debug, PartialEq)]
+enum TerrainType {
+    Grass,
+    Dirt,
 }
 
 // Placement mode resource - tracks which entity type is selected for placement
@@ -75,12 +89,37 @@ impl PlacementMode {
     }
 }
 
+// Paint mode resource - tracks which terrain type is selected for painting
+#[derive(Resource, Default, Clone, Debug)]
+struct PaintMode {
+    selected: Option<TerrainType>,
+}
+
+impl PaintMode {
+    fn select(&mut self, terrain_type: TerrainType) {
+        self.selected = Some(terrain_type);
+    }
+
+    fn deselect(&mut self) {
+        self.selected = None;
+    }
+
+    fn is_selected(&self, terrain_type: &TerrainType) -> bool {
+        if let Some(ref selected) = self.selected {
+            selected == terrain_type
+        } else {
+            false
+        }
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         .add_plugins(MapPlugin)
         .init_resource::<WorldManager>()
         .init_resource::<PlacementMode>()
+        .init_resource::<PaintMode>()
         .add_systems(Startup, (setup_world, setup_ui))
         .add_systems(
             Update,
@@ -106,14 +145,21 @@ fn main() {
                 // Camera controls
                 move_camera,
                 zoom_camera,
-                // Entity placement
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                // Entity placement and terrain painting
                 handle_entity_placement,
+                handle_terrain_painting,
                 update_button_selection,
+                update_terrain_button_selection,
                 // World management
                 loader::update_camera_chunk,
                 loader::load_chunks_around_camera.after(loader::update_camera_chunk),
                 loader::unload_distant_chunks.after(loader::load_chunks_around_camera),
-                loader::apply_tile_modifications.after(snail_dirt_trail),
+                loader::apply_tile_modifications.after(snail_dirt_trail).after(handle_terrain_painting),
             ),
         )
         .run();
@@ -484,22 +530,147 @@ fn setup_ui(
                     ));
                 });
 
-            // Button 4 - Empty
+            // Button 4 - Terrain painting (with submenu row)
             parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(64.0),
-                        height: Val::Px(64.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.2, 0.2, 0.2)),
-                    BorderColor::all(Color::srgb(0.4, 0.4, 0.4)),
-                    BorderRadius::all(Val::Px(4.0)),
-                ))
-                .observe(button_interaction);
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(10.0),
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|row| {
+                    // Load terrain tileset for UI (separate file - won't be reinterpreted as array texture)
+                    // terrain_array_ui.png is 8x16 pixels = 2 tiles stacked vertically (8x8 each)
+                    let terrain_ui_texture = assets.load("tilesets/terrain_array_ui.png");
+                    let terrain_ui_layout = TextureAtlasLayout::from_grid(UVec2::splat(8), 1, 2, None, None);
+                    let terrain_ui_atlas_layout = texture_atlas_layouts.add(terrain_ui_layout);
+
+                    // Main terrain button (starts with grass)
+                    row.spawn((
+                        Button,
+                        TerrainButton,
+                        TerrainType::Grass,
+                        Node {
+                            width: Val::Px(64.0),
+                            height: Val::Px(64.0),
+                            display: Display::Flex,
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            padding: UiRect::all(Val::Px(0.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
+                        BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
+                        BorderRadius::all(Val::Px(4.0)),
+                    ))
+                    .observe(terrain_button_interaction)
+                    .observe(terrain_button_right_click)
+                    .with_children(|button| {
+                        // Add grass tile sprite (index 0 in atlas = TILE_GRASS in world)
+                        button.spawn((
+                            ImageNode {
+                                image: terrain_ui_texture.clone(),
+                                image_mode: NodeImageMode::Stretch,
+                                texture_atlas: Some(TextureAtlas {
+                                    layout: terrain_ui_atlas_layout.clone(),
+                                    index: 0, // First tile in atlas = grass
+                                }),
+                                ..default()
+                            },
+                            Node {
+                                width: Val::Px(64.0),
+                                height: Val::Px(64.0),
+                                ..default()
+                            },
+                        ));
+                    });
+
+                    // Submenu container (initially hidden)
+                    row.spawn((
+                        TerrainSubmenu,
+                        Node {
+                            display: Display::None, // Hidden by default
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(10.0),
+                            ..default()
+                        },
+                    ))
+                    .with_children(|submenu| {
+                        // Grass button
+                        submenu.spawn((
+                            Button,
+                            TerrainType::Grass,
+                            Node {
+                                width: Val::Px(64.0),
+                                height: Val::Px(64.0),
+                                display: Display::Flex,
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                padding: UiRect::all(Val::Px(0.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
+                            BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
+                            BorderRadius::all(Val::Px(4.0)),
+                        ))
+                        .observe(terrain_button_interaction)
+                        .with_children(|button| {
+                            button.spawn((
+                                ImageNode {
+                                    image: terrain_ui_texture.clone(),
+                                    image_mode: NodeImageMode::Stretch,
+                                    texture_atlas: Some(TextureAtlas {
+                                        layout: terrain_ui_atlas_layout.clone(),
+                                        index: 0, // First tile = grass
+                                    }),
+                                    ..default()
+                                },
+                                Node {
+                                    width: Val::Px(64.0),
+                                    height: Val::Px(64.0),
+                                    ..default()
+                                },
+                            ));
+                        });
+
+                        // Dirt button
+                        submenu.spawn((
+                            Button,
+                            TerrainType::Dirt,
+                            Node {
+                                width: Val::Px(64.0),
+                                height: Val::Px(64.0),
+                                display: Display::Flex,
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                padding: UiRect::all(Val::Px(0.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
+                            BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
+                            BorderRadius::all(Val::Px(4.0)),
+                        ))
+                        .observe(terrain_button_interaction)
+                        .with_children(|button| {
+                            button.spawn((
+                                ImageNode {
+                                    image: terrain_ui_texture.clone(),
+                                    image_mode: NodeImageMode::Stretch,
+                                    texture_atlas: Some(TextureAtlas {
+                                        layout: terrain_ui_atlas_layout.clone(),
+                                        index: 1, // Second tile = dirt
+                                    }),
+                                    ..default()
+                                },
+                                Node {
+                                    width: Val::Px(64.0),
+                                    height: Val::Px(64.0),
+                                    ..default()
+                                },
+                            ));
+                        });
+                    });
+                });
         });
 }
 
@@ -510,6 +681,7 @@ fn button_interaction(
         Query<(&mut EntityType, &Children), With<GuardianButton>>,
     )>,
     mut placement_mode: ResMut<PlacementMode>,
+    mut paint_mode: ResMut<PaintMode>,
     mut submenu_query: Query<&mut Node, With<GuardianSubmenu>>,
     mut image_query: Query<&mut ImageNode>,
     assets: Res<AssetServer>,
@@ -548,6 +720,9 @@ fn button_interaction(
             }
         }
 
+        // Clear terrain paint mode when selecting entity
+        paint_mode.deselect();
+
         // Toggle selection - if already selected, deselect; otherwise select
         if placement_mode.is_selected(&entity_type) {
             placement_mode.deselect();
@@ -562,6 +737,86 @@ fn button_interaction(
 fn guardian_button_right_click(
     trigger: On<Pointer<Click>>,
     mut submenu_query: Query<&mut Node, With<GuardianSubmenu>>,
+) {
+    // Only respond to right-click (Secondary button)
+    if trigger.event().button != PointerButton::Secondary {
+        return;
+    }
+
+    // Toggle submenu visibility
+    if let Ok(mut node) = submenu_query.single_mut() {
+        node.display = if node.display == Display::None {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+}
+
+fn terrain_button_interaction(
+    trigger: On<Pointer<Click>>,
+    mut param_set: ParamSet<(
+        Query<(&TerrainType, Option<&TerrainButton>), With<Button>>,
+        Query<(&mut TerrainType, &Children), With<TerrainButton>>,
+    )>,
+    mut paint_mode: ResMut<PaintMode>,
+    mut placement_mode: ResMut<PlacementMode>,
+    mut submenu_query: Query<&mut Node, With<TerrainSubmenu>>,
+    mut image_query: Query<&mut ImageNode>,
+) {
+    // First, get the clicked button's info
+    let button_info = param_set.p0().get(trigger.entity).ok().map(|(tt, tb)| (tt.clone(), tb.is_none()));
+
+    if let Some((terrain_type, is_not_main_terrain)) = button_info {
+        // Check if this is a terrain variant from the submenu (not the main terrain button)
+        let is_submenu_terrain = is_not_main_terrain;
+
+        if is_submenu_terrain {
+            // Terrain variant selected from submenu - close menu and update main button
+            if let Ok(mut submenu_node) = submenu_query.single_mut() {
+                submenu_node.display = Display::None;
+            }
+
+            // Update the main terrain button's TerrainType and icon
+            if let Ok((mut terrain_button_type, children)) = param_set.p1().single_mut() {
+                *terrain_button_type = terrain_type.clone();
+
+                // Update the icon texture atlas index (0-based, not tile IDs)
+                let atlas_index = match terrain_type {
+                    TerrainType::Grass => 0,  // First tile in atlas
+                    TerrainType::Dirt => 1,   // Second tile in atlas
+                };
+
+                // Find and update the child ImageNode's texture atlas index
+                for child in children {
+                    if let Ok(mut image_node) = image_query.get_mut(*child) {
+                        if let Some(ref mut atlas) = image_node.texture_atlas {
+                            atlas.index = atlas_index;
+                            info!("Updated terrain button icon to {:?} terrain", terrain_type);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Clear entity placement mode when selecting terrain
+        placement_mode.deselect();
+
+        // Toggle selection - if already selected, deselect; otherwise select
+        if paint_mode.is_selected(&terrain_type) {
+            paint_mode.deselect();
+            info!("Deselected terrain painting");
+        } else {
+            paint_mode.select(terrain_type.clone());
+            info!("Selected terrain type for painting: {:?}", terrain_type);
+        }
+    }
+}
+
+fn terrain_button_right_click(
+    trigger: On<Pointer<Click>>,
+    mut submenu_query: Query<&mut Node, With<TerrainSubmenu>>,
 ) {
     // Only respond to right-click (Secondary button)
     if trigger.event().button != PointerButton::Secondary {
@@ -620,6 +875,30 @@ fn update_button_selection(
                     *border_color = BorderColor::all(Color::srgb(0.5, 0.4, 0.5));
                 }
             }
+        }
+    }
+}
+
+/// Updates terrain button visual feedback based on paint mode selection
+fn update_terrain_button_selection(
+    paint_mode: Res<PaintMode>,
+    mut buttons: Query<(&TerrainType, &mut BackgroundColor, &mut BorderColor), With<Button>>,
+) {
+    // Only update if paint mode changed
+    if !paint_mode.is_changed() {
+        return;
+    }
+
+    for (terrain_type, mut bg_color, mut border_color) in buttons.iter_mut() {
+        let is_selected = paint_mode.is_selected(terrain_type);
+
+        // Update colors based on selection state
+        if is_selected {
+            *bg_color = BackgroundColor(Color::srgb(0.3, 0.5, 0.3)); // Brighter when selected
+            *border_color = BorderColor::all(Color::srgb(0.6, 1.0, 0.6));
+        } else {
+            *bg_color = BackgroundColor(Color::srgb(0.2, 0.3, 0.2)); // Standard color
+            *border_color = BorderColor::all(Color::srgb(0.4, 0.6, 0.4));
         }
     }
 }
@@ -694,4 +973,60 @@ fn handle_entity_placement(
             info!("Spawned snail at ({}, {})", world_pos.x, world_pos.y);
         }
     }
+}
+
+/// Handles mouse clicks to paint terrain in the world
+fn handle_terrain_painting(
+    paint_mode: Res<PaintMode>,
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    ui_query: Query<&Interaction, With<Button>>,
+    mut world_manager: ResMut<WorldManager>,
+) {
+    // Only handle left clicks when a terrain type is selected
+    if !mouse_button.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let Some(ref terrain_type) = paint_mode.selected else {
+        return;
+    };
+
+    // Don't paint terrain if cursor is over any UI element
+    for interaction in ui_query.iter() {
+        if *interaction == Interaction::Pressed || *interaction == Interaction::Hovered {
+            return;
+        }
+    }
+
+    // Get the primary window
+    let Ok(window) = windows.single() else {
+        return;
+    };
+
+    // Get cursor position in window
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
+
+    // Get camera components
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
+
+    // Convert cursor position to world position
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        return;
+    };
+
+    // Determine which tile to paint based on terrain type
+    let tile_id = match terrain_type {
+        TerrainType::Grass => TILE_GRASS,
+        TerrainType::Dirt => TILE_DIRT,
+    };
+
+    // Queue the tile modification on the ground layer
+    world_manager.queue_tile_modification(world_pos.x, world_pos.y, tile_id, LAYER_GROUND);
+    info!("Painted {:?} tile at ({}, {})", terrain_type, world_pos.x, world_pos.y);
 }

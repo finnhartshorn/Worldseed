@@ -1,23 +1,25 @@
-use crate::tiles::{ChunkData, ChunkPos, TILE_GRASS, TILE_EMPTY};
+use crate::tiles::{ChunkData, ChunkPos, TILE_GRASS, TILE_DIRT, CHUNK_SIZE, LAYER_GROUND};
 
 /// Generate a new chunk at the given position
-/// For now, generates a simple grass world with empty decoration and overlay layers
+/// Generates a checkerboard pattern of grass and dirt tiles
 pub fn generate_chunk(position: ChunkPos) -> ChunkData {
-    // Ground layer: all grass tiles
-    // Decoration and overlay layers: empty
-    let chunk = ChunkData::filled(position, TILE_GRASS);
+    // Start with empty chunk
+    let mut chunk = ChunkData::empty(position);
 
-    // The filled method now creates all layers with the same tile
-    // For now, we'll leave it as-is (grass on all layers)
-    // In the future, we can set different tiles per layer for variety
+    // Create checkerboard pattern on ground layer
+    for y in 0..CHUNK_SIZE {
+        for x in 0..CHUNK_SIZE {
+            // Alternate between grass and dirt based on tile coordinates
+            let tile = if (x + y) % 2 == 0 {
+                TILE_GRASS
+            } else {
+                TILE_DIRT
+            };
+            chunk.set_tile(LAYER_GROUND, x, y, tile);
+        }
+    }
 
-    // Future: Add procedural generation
-    // - Use noise functions for terrain variety
-    // - Add dirt patches, water, trees, etc on ground layer
-    // - Add decorations (flowers, rocks) on decoration layer
-    // - Add effects/particles on overlay layer
-    // - Generate based on biomes
-    // - Add structures/features
+    // Decoration and overlay layers remain empty
 
     chunk
 }
