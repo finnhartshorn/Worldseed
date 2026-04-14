@@ -1,9 +1,6 @@
 use bevy::{
-    input::mouse::MouseWheel,
-    prelude::*,
-    sprite_render::TilemapChunk,
-    window::PrimaryWindow,
-    picking::pointer::PointerButton,
+    input::mouse::MouseWheel, picking::pointer::PointerButton, prelude::*,
+    sprite_render::TilemapChunk, window::PrimaryWindow,
 };
 
 mod entities;
@@ -19,7 +16,7 @@ use entities::{
 };
 use map::MapPlugin;
 use tiles::constants::{LAYER_GROUND, TILE_DIRT, TILE_GRASS};
-use world::{loader, WorldManager};
+use world::{loader, manager::ChunkDataChanged, WorldManager};
 
 // UI sprite vertical offsets for proper centering
 const HUMAN_SPRITE_OFFSET: f32 = 1.0;
@@ -28,8 +25,8 @@ const SNAIL_SPRITE_OFFSET: f32 = 10.0;
 const SNAIL_SPRITE_OFFSET_X: f32 = 10.0;
 
 // Camera zoom configuration
-const ZOOM_MIN: f32 = 0.5;  // Max zoom in (smaller = more zoomed in)
-const ZOOM_MAX: f32 = 3.0;  // Max zoom out (larger = more zoomed out)
+const ZOOM_MIN: f32 = 0.5; // Max zoom in (smaller = more zoomed in)
+const ZOOM_MAX: f32 = 3.0; // Max zoom out (larger = more zoomed out)
 const ZOOM_SPEED: f32 = 0.1; // Zoom change per input
 
 // UI marker components
@@ -113,14 +110,54 @@ impl PaintMode {
     }
 }
 
+// Save notification resource - tracks save notification display state
+#[derive(Resource)]
+struct SaveNotification {
+    timer: Timer,
+    visible: bool,
+}
+
+impl Default for SaveNotification {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(0.0, TimerMode::Once),
+            visible: false,
+        }
+    }
+}
+
+impl SaveNotification {
+    fn show(&mut self, duration: f32) {
+        self.timer = Timer::from_seconds(duration, TimerMode::Once);
+        self.visible = true;
+    }
+
+    fn tick(&mut self, delta: std::time::Duration) {
+        if self.visible {
+            self.timer.tick(delta);
+            if self.timer.just_finished() {
+                self.visible = false;
+            }
+        }
+    }
+}
+
+// Marker component for save notification UI text
+#[derive(Component)]
+struct SaveNotificationText;
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         .add_plugins(MapPlugin)
         .init_resource::<WorldManager>()
+        .init_resource::<loader::ChunkSaveTimer>()
         .init_resource::<PlacementMode>()
         .init_resource::<PaintMode>()
-        .add_systems(Startup, (setup_world, setup_ui))
+        .init_resource::<SaveNotification>()
+        // Register observer for ChunkDataChanged to sync visuals
+        .add_observer(loader::sync_chunk_visuals_on_data_change)
+        .add_systems(Startup, (setup_world, setup_ui, setup_save_notification_ui))
         .add_systems(
             Update,
             (
@@ -145,6 +182,7 @@ fn main() {
                 // Camera controls
                 move_camera,
                 zoom_camera,
+                // loader::update_tilemap,
             ),
         )
         .add_systems(
@@ -155,11 +193,15 @@ fn main() {
                 handle_terrain_painting,
                 update_button_selection,
                 update_terrain_button_selection,
+                // Save notification
+                handle_manual_save,
+                update_save_notification,
                 // World management
                 loader::update_camera_chunk,
                 loader::load_chunks_around_camera.after(loader::update_camera_chunk),
                 loader::unload_distant_chunks.after(loader::load_chunks_around_camera),
-                loader::apply_tile_modifications.after(snail_dirt_trail).after(handle_terrain_painting),
+                loader::apply_tile_modifications,
+                loader::autosave_dirty_chunks,
             ),
         )
         .run();
@@ -231,7 +273,6 @@ fn update_tileset_image(
         }
     }
 }
-
 
 /// Camera movement system for testing chunk loading
 fn move_camera(
@@ -542,7 +583,8 @@ fn setup_ui(
                     // Load terrain tileset for UI (separate file - won't be reinterpreted as array texture)
                     // terrain_array_ui.png is 8x16 pixels = 2 tiles stacked vertically (8x8 each)
                     let terrain_ui_texture = assets.load("tilesets/terrain_array_ui.png");
-                    let terrain_ui_layout = TextureAtlasLayout::from_grid(UVec2::splat(8), 1, 2, None, None);
+                    let terrain_ui_layout =
+                        TextureAtlasLayout::from_grid(UVec2::splat(8), 1, 2, None, None);
                     let terrain_ui_atlas_layout = texture_atlas_layouts.add(terrain_ui_layout);
 
                     // Main terrain button (starts with grass)
@@ -597,78 +639,80 @@ fn setup_ui(
                     ))
                     .with_children(|submenu| {
                         // Grass button
-                        submenu.spawn((
-                            Button,
-                            TerrainType::Grass,
-                            Node {
-                                width: Val::Px(64.0),
-                                height: Val::Px(64.0),
-                                display: Display::Flex,
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                padding: UiRect::all(Val::Px(0.0)),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
-                            BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
-                            BorderRadius::all(Val::Px(4.0)),
-                        ))
-                        .observe(terrain_button_interaction)
-                        .with_children(|button| {
-                            button.spawn((
-                                ImageNode {
-                                    image: terrain_ui_texture.clone(),
-                                    image_mode: NodeImageMode::Stretch,
-                                    texture_atlas: Some(TextureAtlas {
-                                        layout: terrain_ui_atlas_layout.clone(),
-                                        index: 0, // First tile = grass
-                                    }),
-                                    ..default()
-                                },
+                        submenu
+                            .spawn((
+                                Button,
+                                TerrainType::Grass,
                                 Node {
                                     width: Val::Px(64.0),
                                     height: Val::Px(64.0),
+                                    display: Display::Flex,
+                                    justify_content: JustifyContent::Center,
+                                    align_items: AlignItems::Center,
+                                    padding: UiRect::all(Val::Px(0.0)),
                                     ..default()
                                 },
-                            ));
-                        });
+                                BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
+                                BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
+                                BorderRadius::all(Val::Px(4.0)),
+                            ))
+                            .observe(terrain_button_interaction)
+                            .with_children(|button| {
+                                button.spawn((
+                                    ImageNode {
+                                        image: terrain_ui_texture.clone(),
+                                        image_mode: NodeImageMode::Stretch,
+                                        texture_atlas: Some(TextureAtlas {
+                                            layout: terrain_ui_atlas_layout.clone(),
+                                            index: 0, // First tile = grass
+                                        }),
+                                        ..default()
+                                    },
+                                    Node {
+                                        width: Val::Px(64.0),
+                                        height: Val::Px(64.0),
+                                        ..default()
+                                    },
+                                ));
+                            });
 
                         // Dirt button
-                        submenu.spawn((
-                            Button,
-                            TerrainType::Dirt,
-                            Node {
-                                width: Val::Px(64.0),
-                                height: Val::Px(64.0),
-                                display: Display::Flex,
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                padding: UiRect::all(Val::Px(0.0)),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
-                            BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
-                            BorderRadius::all(Val::Px(4.0)),
-                        ))
-                        .observe(terrain_button_interaction)
-                        .with_children(|button| {
-                            button.spawn((
-                                ImageNode {
-                                    image: terrain_ui_texture.clone(),
-                                    image_mode: NodeImageMode::Stretch,
-                                    texture_atlas: Some(TextureAtlas {
-                                        layout: terrain_ui_atlas_layout.clone(),
-                                        index: 1, // Second tile = dirt
-                                    }),
-                                    ..default()
-                                },
+                        submenu
+                            .spawn((
+                                Button,
+                                TerrainType::Dirt,
                                 Node {
                                     width: Val::Px(64.0),
                                     height: Val::Px(64.0),
+                                    display: Display::Flex,
+                                    justify_content: JustifyContent::Center,
+                                    align_items: AlignItems::Center,
+                                    padding: UiRect::all(Val::Px(0.0)),
                                     ..default()
                                 },
-                            ));
-                        });
+                                BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
+                                BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
+                                BorderRadius::all(Val::Px(4.0)),
+                            ))
+                            .observe(terrain_button_interaction)
+                            .with_children(|button| {
+                                button.spawn((
+                                    ImageNode {
+                                        image: terrain_ui_texture.clone(),
+                                        image_mode: NodeImageMode::Stretch,
+                                        texture_atlas: Some(TextureAtlas {
+                                            layout: terrain_ui_atlas_layout.clone(),
+                                            index: 1, // Second tile = dirt
+                                        }),
+                                        ..default()
+                                    },
+                                    Node {
+                                        width: Val::Px(64.0),
+                                        height: Val::Px(64.0),
+                                        ..default()
+                                    },
+                                ));
+                            });
                     });
                 });
         });
@@ -687,11 +731,16 @@ fn button_interaction(
     assets: Res<AssetServer>,
 ) {
     // First, get the clicked button's info
-    let button_info = param_set.p0().get(trigger.entity).ok().map(|(et, gb)| (et.clone(), gb.is_none()));
+    let button_info = param_set
+        .p0()
+        .get(trigger.entity)
+        .ok()
+        .map(|(et, gb)| (et.clone(), gb.is_none()));
 
     if let Some((entity_type, is_not_main_guardian)) = button_info {
         // Check if this is a guardian variant from the submenu (not the main guardian button)
-        let is_submenu_guardian = matches!(entity_type, EntityType::ForestGuardian(_)) && is_not_main_guardian;
+        let is_submenu_guardian =
+            matches!(entity_type, EntityType::ForestGuardian(_)) && is_not_main_guardian;
 
         if is_submenu_guardian {
             // Guardian variant selected from submenu - close menu and update main button
@@ -705,7 +754,8 @@ fn button_interaction(
 
                 // Update the icon texture
                 if let EntityType::ForestGuardian(variant) = &entity_type {
-                    let texture_path = format!("creatures/forest_guardians/{}_guardian_idle.png", variant);
+                    let texture_path =
+                        format!("creatures/forest_guardians/{}_guardian_idle.png", variant);
                     let new_texture = assets.load(&texture_path);
 
                     // Find and update the child ImageNode
@@ -765,7 +815,11 @@ fn terrain_button_interaction(
     mut image_query: Query<&mut ImageNode>,
 ) {
     // First, get the clicked button's info
-    let button_info = param_set.p0().get(trigger.entity).ok().map(|(tt, tb)| (tt.clone(), tb.is_none()));
+    let button_info = param_set
+        .p0()
+        .get(trigger.entity)
+        .ok()
+        .map(|(tt, tb)| (tt.clone(), tb.is_none()));
 
     if let Some((terrain_type, is_not_main_terrain)) = button_info {
         // Check if this is a terrain variant from the submenu (not the main terrain button)
@@ -783,8 +837,8 @@ fn terrain_button_interaction(
 
                 // Update the icon texture atlas index (0-based, not tile IDs)
                 let atlas_index = match terrain_type {
-                    TerrainType::Grass => 0,  // First tile in atlas
-                    TerrainType::Dirt => 1,   // Second tile in atlas
+                    TerrainType::Grass => 0, // First tile in atlas
+                    TerrainType::Dirt => 1,  // Second tile in atlas
                 };
 
                 // Find and update the child ImageNode's texture atlas index
@@ -966,7 +1020,10 @@ fn handle_entity_placement(
                 &assets,
                 &mut texture_atlas_layouts,
             );
-            info!("Spawned {} forest guardian at ({}, {})", variant, world_pos.x, world_pos.y);
+            info!(
+                "Spawned {} forest guardian at ({}, {})",
+                variant, world_pos.x, world_pos.y
+            );
         }
         EntityType::Snail => {
             spawn_snail(&mut commands, position, &assets, &mut texture_atlas_layouts);
@@ -1028,5 +1085,109 @@ fn handle_terrain_painting(
 
     // Queue the tile modification on the ground layer
     world_manager.queue_tile_modification(world_pos.x, world_pos.y, tile_id, LAYER_GROUND);
-    info!("Painted {:?} tile at ({}, {})", terrain_type, world_pos.x, world_pos.y);
+    info!(
+        "Painted {:?} tile at ({}, {})",
+        terrain_type, world_pos.x, world_pos.y
+    );
+}
+
+/// Setup UI for save notification in top right corner
+fn setup_save_notification_ui(mut commands: Commands) {
+    // Create text container in top right corner
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(20.0),
+            top: Val::Px(20.0),
+            padding: UiRect::all(Val::Px(10.0)),
+            ..default()
+        })
+        .with_children(|parent| {
+            parent.spawn((
+                SaveNotificationText,
+                Text::new("Saving..."),
+                TextFont {
+                    font_size: 24.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.9, 0.9, 0.9)),
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+                Node {
+                    padding: UiRect::all(Val::Px(8.0)),
+                    ..default()
+                },
+                Visibility::Hidden, // Start hidden
+            ));
+        });
+}
+
+/// System to handle 's' key press and trigger manual save
+fn handle_manual_save(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut save_notification: ResMut<SaveNotification>,
+    mut world: ResMut<WorldManager>,
+) {
+    use world::serialization;
+
+    // Only trigger on 's' key press
+    if !keyboard.just_pressed(KeyCode::KeyS) {
+        return;
+    }
+
+    let dirty_chunks = world.get_dirty_chunks();
+    if dirty_chunks.is_empty() {
+        info!("Manual save triggered but no dirty chunks to save");
+        return;
+    }
+
+    info!("Manual save: saving {} dirty chunks", dirty_chunks.len());
+
+    let mut saved_count = 0;
+    let mut failed_count = 0;
+
+    for chunk_pos in dirty_chunks {
+        if let Some(chunk_data) = world.get_cached_chunk(&chunk_pos) {
+            let chunk_path = world.get_chunk_path(&chunk_pos);
+            match serialization::save_chunk(chunk_data, &chunk_path) {
+                Ok(_) => {
+                    debug!("Manually saved chunk {:?}", chunk_pos);
+                    world.clear_dirty(&chunk_pos);
+                    saved_count += 1;
+                }
+                Err(e) => {
+                    error!("Failed to manually save chunk {:?}: {}", chunk_pos, e);
+                    failed_count += 1;
+                }
+            }
+        }
+    }
+
+    info!(
+        "Manual save complete: {} saved, {} failed",
+        saved_count, failed_count
+    );
+
+    // Show notification for duration of save + 2 seconds
+    // We'll estimate save duration based on chunk count (very fast for our case)
+    // So we'll just show for 2 seconds total
+    save_notification.show(2.0);
+}
+
+/// System to update save notification visibility based on timer
+fn update_save_notification(
+    time: Res<Time>,
+    mut save_notification: ResMut<SaveNotification>,
+    mut query: Query<&mut Visibility, With<SaveNotificationText>>,
+) {
+    // Tick the notification timer
+    save_notification.tick(time.delta());
+
+    // Update visibility based on notification state
+    if let Ok(mut visibility) = query.single_mut() {
+        *visibility = if save_notification.visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
 }

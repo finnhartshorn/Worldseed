@@ -13,6 +13,13 @@ pub struct TileModification {
     pub layer: usize,
 }
 
+/// Event triggered when chunk data changes and visuals need to be updated
+#[derive(Event, Debug, Clone)]
+pub struct ChunkDataChanged {
+    pub chunk_pos: ChunkPos,
+    pub layer: usize,
+}
+
 /// World manager resource that tracks all loaded chunks and their state
 #[derive(Resource)]
 pub struct WorldManager {

@@ -4,8 +4,25 @@ use crate::tiles::{
     TILE_DISPLAY_SIZE,
 };
 use bevy::prelude::*;
-use bevy::sprite_render::{TilemapChunk, TilemapChunkTileData};
+use bevy::sprite_render::{TileData, TilemapChunk, TilemapChunkTileData};
+use rand::prelude::*;
 use std::collections::HashSet;
+
+#[derive(Component, Deref, DerefMut)]
+pub struct UpdateTimer(Timer);
+
+/// Resource for tracking periodic chunk saves (every 30 seconds by default)
+#[derive(Resource, Deref, DerefMut)]
+pub struct ChunkSaveTimer(Timer);
+
+impl Default for ChunkSaveTimer {
+    fn default() -> Self {
+        Self(Timer::from_seconds(30.0, TimerMode::Repeating))
+    }
+}
+
+// #[derive(Resource, Deref, DerefMut)]
+// struct SeededRng(ChaCha8Rng);
 
 /// System to track camera position and trigger chunk loading/unloading
 pub fn update_camera_chunk(
@@ -22,6 +39,43 @@ pub fn update_camera_chunk(
             info!("Camera moved to chunk {:?}", chunk_pos);
         }
     }
+}
+
+/// Helper function to load chunk data into cache without spawning visual entities.
+/// This is the data-layer operation that ensures ChunkData exists in cache.
+///
+/// Returns a reference to the cached ChunkData.
+fn load_chunk_data_only(world: &mut WorldManager, chunk_pos: ChunkPos) -> ChunkData {
+    // Check if already in cache
+    if let Some(cached) = world.get_cached_chunk(&chunk_pos) {
+        return cached.clone();
+    }
+
+    // Try to load from disk
+    let chunk_path = world.get_chunk_path(&chunk_pos);
+    let chunk_data = if serialization::chunk_exists(&chunk_path) {
+        match serialization::load_chunk(&chunk_path) {
+            Ok(data) => {
+                info!("Loaded chunk {:?} from disk (data only)", chunk_pos);
+                data
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load chunk {:?}: {}, generating new",
+                    chunk_pos, e
+                );
+                generator::generate_chunk(chunk_pos)
+            }
+        }
+    } else {
+        // Generate new chunk
+        info!("Generating new chunk {:?} (data only)", chunk_pos);
+        generator::generate_chunk(chunk_pos)
+    };
+
+    // Cache the data
+    world.cache_chunk(chunk_data.clone());
+    chunk_data
 }
 
 /// System to load chunks around the camera
@@ -50,34 +104,14 @@ pub fn load_chunks_around_camera(
             continue;
         }
 
-        // Try to load from cache first
-        let chunk_data = if let Some(cached) = world.get_cached_chunk(&chunk_pos) {
-            cached.clone()
-        } else {
-            // Try to load from disk
-            let chunk_path = world.get_chunk_path(&chunk_pos);
-            if serialization::chunk_exists(&chunk_path) {
-                match serialization::load_chunk(&chunk_path) {
-                    Ok(data) => {
-                        info!("Loaded chunk {:?} from disk", chunk_pos);
-                        data
-                    }
-                    Err(e) => {
-                        warn!("Failed to load chunk {:?}: {}, generating new", chunk_pos, e);
-                        generator::generate_chunk(chunk_pos)
-                    }
-                }
-            } else {
-                // Generate new chunk
-                info!("Generating new chunk {:?}", chunk_pos);
-                generator::generate_chunk(chunk_pos)
-            }
-        };
+        // Load chunk data into cache (without spawning visual entities)
+        let chunk_data = load_chunk_data_only(&mut world, chunk_pos);
 
         // Get world position for chunk
-        let world_pos = chunk_pos.to_world(crate::tiles::CHUNK_PIXEL_SIZE);
+        let chunk_origin = chunk_pos.to_world(crate::tiles::CHUNK_PIXEL_SIZE);
+        let chunk_center = chunk_origin + Vec2::splat(crate::tiles::CHUNK_PIXEL_SIZE / 2.0);
 
-        // Spawn one entity per layer
+        // Spawn visual entities (view layer) from cached data
         let mut layer_entities = [Entity::PLACEHOLDER; crate::tiles::NUM_LAYERS];
         for layer_idx in 0..crate::tiles::NUM_LAYERS {
             let tile_data = chunk_data.layer_to_tilemap_data(layer_idx);
@@ -92,19 +126,23 @@ pub fn load_chunks_around_camera(
                         ..default()
                     },
                     TilemapChunkTileData(tile_data),
-                    Transform::from_xyz(world_pos.x, world_pos.y, z_pos),
+                    Transform::from_xyz(chunk_center.x, chunk_center.y, z_pos),
                     Chunk::with_layer(chunk_pos, layer_idx),
+                    UpdateTimer(Timer::from_seconds(0.1, TimerMode::Repeating)),
                 ))
                 .id();
 
             layer_entities[layer_idx] = entity;
         }
 
-        // Register in world manager
+        // Register visual entities in world manager
         world.register_chunk(chunk_pos, layer_entities);
-        world.cache_chunk(chunk_data);
 
-        info!("Loaded chunk {:?} with {} layers", chunk_pos, crate::tiles::NUM_LAYERS);
+        info!(
+            "Loaded chunk {:?} with {} layers",
+            chunk_pos,
+            crate::tiles::NUM_LAYERS
+        );
     }
 
     // Print chunk grid after loading
@@ -163,15 +201,23 @@ pub fn unload_distant_chunks(
             }
         }
 
-        // Despawn all layer entities
+        // Despawn all layer entities (visual cleanup only)
         if let Some(layer_entities) = world.unregister_chunk(&chunk_pos) {
             for layer_entity in layer_entities {
                 commands.entity(layer_entity).despawn();
             }
         }
-        world.uncache_chunk(&chunk_pos);
 
-        info!("Unloaded chunk {:?} with all layers", chunk_pos);
+        // NOTE: We no longer uncache chunk data here!
+        // ChunkData persists in cache independent of rendering state.
+        // This allows entities to modify unrendered chunks and enables faster re-loading.
+        // Cache is unlimited as per architecture decision.
+        // world.uncache_chunk(&chunk_pos);  // REMOVED
+
+        info!(
+            "Unloaded visual entities for chunk {:?} (data preserved in cache)",
+            chunk_pos
+        );
     }
 
     // Print chunk grid after unloading
@@ -182,17 +228,43 @@ pub fn unload_distant_chunks(
     }
 }
 
-/// System to periodically save dirty chunks (autosave)
-pub fn autosave_dirty_chunks(world: Res<WorldManager>) {
-    for chunk_pos in world.get_dirty_chunks() {
+/// System to periodically save dirty chunks (autosave with timer)
+pub fn autosave_dirty_chunks(
+    time: Res<Time>,
+    mut timer: ResMut<ChunkSaveTimer>,
+    mut world: ResMut<WorldManager>,
+) {
+    // Tick the timer
+    timer.tick(time.delta());
+
+    // Only save when timer finishes
+    if !timer.just_finished() {
+        return;
+    }
+
+    let dirty_chunks = world.get_dirty_chunks();
+    if dirty_chunks.is_empty() {
+        return;
+    }
+
+    info!(
+        "Autosave: saving {} dirty chunks (periodic save every {}s)",
+        dirty_chunks.len(),
+        timer.0.duration().as_secs()
+    );
+
+    for chunk_pos in dirty_chunks {
         if let Some(chunk_data) = world.get_cached_chunk(&chunk_pos) {
             let chunk_path = world.get_chunk_path(&chunk_pos);
             match serialization::save_chunk(chunk_data, &chunk_path) {
                 Ok(_) => {
                     debug!("Autosaved chunk {:?}", chunk_pos);
+                    // Clear dirty flag after successful save
+                    world.clear_dirty(&chunk_pos);
                 }
                 Err(e) => {
                     error!("Failed to autosave chunk {:?}: {}", chunk_pos, e);
+                    // Keep dirty flag on failure so we retry next time
                 }
             }
         }
@@ -216,49 +288,131 @@ pub fn log_world_stats(world: Res<WorldManager>) {
     debug!("World stats: {}", stats);
 }
 
-/// System to apply pending tile modifications to both cache and visual tilemap
+/// System to apply pending tile modifications to cache and trigger observers for visual updates
 pub fn apply_tile_modifications(
     mut world: ResMut<WorldManager>,
-    mut chunk_query: Query<(&Chunk, &mut TilemapChunkTileData)>,
+    mut commands: Commands,
 ) {
     use crate::tiles::chunk::coords;
-    use crate::tiles::{TILE_EMPTY, CHUNK_SIZE};
-    use bevy::sprite_render::TileData;
 
     let modifications = world.take_tile_modifications();
     if modifications.is_empty() {
         return;
     }
 
+    info!("Processing {} modifications", modifications.len());
+
     for modification in modifications {
         // Convert world position to chunk position
-        let chunk_pos = coords::world_to_chunk(Vec2::new(modification.world_x, modification.world_y));
+        let chunk_pos =
+            coords::world_to_chunk(Vec2::new(modification.world_x, modification.world_y));
 
-        // Update the cache
-        if let Some(chunk_data) = world.chunk_cache.get_mut(&chunk_pos) {
-            let (local_x, local_y) = coords::world_to_local_tile(Vec2::new(modification.world_x, modification.world_y));
+        // Ensure chunk data is in cache (load from disk/generate if needed)
+        // Modifications work on any chunk, regardless of render state
+        if !world.chunk_cache.contains_key(&chunk_pos) {
+            load_chunk_data_only(&mut world, chunk_pos);
+            debug!(
+                "Loaded chunk {:?} data to apply modification at ({}, {})",
+                chunk_pos, modification.world_x, modification.world_y
+            );
+        }
 
-            if chunk_data.set_tile(modification.layer, local_x, local_y, modification.tile_id) {
-                // Mark chunk as dirty
-                world.mark_dirty(chunk_pos);
+        // Update the cache (this always succeeds)
+        let chunk_data = world
+            .chunk_cache
+            .get_mut(&chunk_pos)
+            .expect("Chunk data should be in cache after load_chunk_data_only");
 
-                // Find and update the visual tilemap entity for this specific layer
-                for (chunk, mut tile_data) in chunk_query.iter_mut() {
-                    if chunk.position == chunk_pos && chunk.layer == modification.layer {
-                        let index = local_y * CHUNK_SIZE + local_x;
-                        if index < tile_data.0.len() {
-                            tile_data.0[index] = if modification.tile_id == TILE_EMPTY {
-                                None
-                            } else {
-                                Some(TileData::from_tileset_index((modification.tile_id - 1) as u16))
-                            };
-                        }
-                        break;
-                    }
-                }
-            }
+        let (local_x, local_y) =
+            coords::world_to_local_tile(Vec2::new(modification.world_x, modification.world_y));
+
+        if chunk_data.set_tile(modification.layer, local_x, local_y, modification.tile_id) {
+            // Mark chunk as dirty for later persistence
+            world.mark_dirty(chunk_pos);
+
+            // Trigger observer for visual update (observer will handle syncing to render layer)
+            info!("🚀 TRIGGERING EVENT: chunk_pos={:?}, layer={}", chunk_pos, modification.layer);
+            commands.trigger(super::manager::ChunkDataChanged {
+                chunk_pos,
+                layer: modification.layer,
+            });
+
+            debug!(
+                "Triggered ChunkDataChanged observer for chunk {:?}, layer {}",
+                chunk_pos, modification.layer
+            );
         }
     }
+}
+
+/// Observer system that syncs visual tilemap entities when chunk data changes
+/// This creates a clean separation: data layer (ChunkData) -> event -> visual layer (TilemapChunk)
+pub fn sync_chunk_visuals_on_data_change(
+    trigger: Trigger<super::manager::ChunkDataChanged>,
+    world: Res<WorldManager>,
+    mut chunk_query: Query<(&Chunk, &mut TilemapChunkTileData)>,
+) {
+    use crate::tiles::{CHUNK_SIZE, TILE_EMPTY};
+    use bevy::sprite_render::TileData;
+
+    let event = trigger.event();
+    let chunk_pos = event.chunk_pos;
+    let layer = event.layer;
+
+    // DEBUG: Log when observer is called
+    info!("🔔 OBSERVER CALLED: chunk_pos={:?}, layer={}", chunk_pos, layer);
+
+    // Get the chunk data from cache
+    let Some(chunk_data) = world.get_cached_chunk(&chunk_pos) else {
+        warn!(
+            "ChunkDataChanged event for chunk {:?} but no data in cache",
+            chunk_pos
+        );
+        return;
+    };
+
+    // DEBUG: Count how many chunk entities we're querying
+    let total_chunks = chunk_query.iter().count();
+    info!("🔍 Observer query found {} total chunk entities", total_chunks);
+
+    // Find the visual entity for this chunk and layer
+    let mut found = false;
+    for (chunk, mut tile_data) in chunk_query.iter_mut() {
+        if chunk.position == chunk_pos && chunk.layer == layer {
+            found = true;
+            info!("✅ FOUND matching chunk entity: pos={:?}, layer={}", chunk.position, chunk.layer);
+            // Sync the entire layer from ChunkData to visual TilemapChunkTileData
+            for y in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    let index = y * CHUNK_SIZE + x;
+                    let tile_id_opt = chunk_data.get_tile(layer, x, y);
+
+                    tile_data.0[index] = match tile_id_opt {
+                        Some(tile_id) if tile_id != TILE_EMPTY => {
+                            Some(TileData::from_tileset_index((tile_id - 1) as u16))
+                        }
+                        _ => None,
+                    };
+                }
+            }
+
+            debug!(
+                "Synced visual tilemap for chunk {:?}, layer {} from cache",
+                chunk_pos, layer
+            );
+            break;
+        }
+    }
+
+    // DEBUG: Log if we didn't find a matching chunk entity
+    if !found {
+        warn!("❌ Observer did NOT find matching chunk entity for pos={:?}, layer={}", chunk_pos, layer);
+    } else {
+        info!("✅ Observer successfully synced visuals for chunk {:?}, layer {}", chunk_pos, layer);
+    }
+
+    // If no visual entity exists, that's ok - chunk might not be rendered yet
+    // The visual will be synced from cache when the chunk is loaded later
 }
 
 /// Calculate which chunks are visible in the camera viewport
@@ -358,7 +512,12 @@ fn calculate_unload_radius(load_radius: i32) -> i32 {
 
 /// Print a visual representation of loaded chunks
 #[cfg(feature = "debug_chunks")]
-fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos, visible_chunks: HashSet<ChunkPos>, load_radius: i32) {
+fn print_chunk_grid(
+    world: &WorldManager,
+    camera_chunk: ChunkPos,
+    visible_chunks: HashSet<ChunkPos>,
+    load_radius: i32,
+) {
     // Determine the range to display (show area around camera)
     // Use load_radius + 1 to show chunks just outside the load area
     let view_radius = (load_radius + 1).max(6); // Show at least 13x13 grid centered on camera
@@ -403,19 +562,19 @@ fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos, visible_chunks
             let is_in_load_radius = camera_chunk.chebyshev_distance(&pos) <= load_radius;
 
             let symbol = if is_camera {
-                " @ "  // Camera position
+                " @ " // Camera position
             } else if is_visible && is_loaded {
-                " ■ "  // Visible and loaded chunk
+                " ■ " // Visible and loaded chunk
             } else if is_visible {
-                " □ "  // Visible but not loaded
+                " □ " // Visible but not loaded
             } else if is_loaded && is_in_load_radius {
-                " █ "  // Loaded chunk in load radius
+                " █ " // Loaded chunk in load radius
             } else if is_loaded {
-                " ▓ "  // Loaded chunk outside load radius (about to unload)
+                " ▓ " // Loaded chunk outside load radius (about to unload)
             } else if is_in_load_radius {
-                " ░ "  // Should be loaded but isn't (transitioning)
+                " ░ " // Should be loaded but isn't (transitioning)
             } else {
-                " · "  // Not loaded
+                " · " // Not loaded
             };
 
             grid.push_str(symbol);
@@ -435,4 +594,23 @@ fn print_chunk_grid(world: &WorldManager, camera_chunk: ChunkPos, visible_chunks
     ));
 
     info!("{}", grid);
+}
+
+pub fn update_tilemap(
+    time: Res<Time>,
+    mut query: Query<(&mut TilemapChunkTileData, &mut UpdateTimer)>,
+) {
+    let mut rng = rand::rng();
+    for (mut tile_data, mut timer) in query.iter_mut() {
+        timer.tick(time.delta());
+
+        info!("Randomizing the chunk!");
+
+        if timer.just_finished() {
+            for _ in 0..50 {
+                let index = rng.random_range(0..tile_data.len());
+                tile_data[index] = Some(TileData::from_tileset_index(rng.random_range(0..2)));
+            }
+        }
+    }
 }

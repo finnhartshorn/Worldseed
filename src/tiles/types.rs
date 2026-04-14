@@ -88,18 +88,18 @@ mod tests {
 
     #[test]
     fn test_from_world() {
-        let chunk_pixel_size = 256.0; // 32 tiles * 8 pixels
+        let chunk_pixel_size = 1024.0; // 32 tiles * 32 world units
 
         // Origin chunk
         let pos = ChunkPos::from_world(Vec2::new(0.0, 0.0), chunk_pixel_size);
         assert_eq!(pos, ChunkPos::new(0, 0));
 
         // Positive chunks
-        let pos = ChunkPos::from_world(Vec2::new(256.0, 256.0), chunk_pixel_size);
+        let pos = ChunkPos::from_world(Vec2::new(1024.0, 1024.0), chunk_pixel_size);
         assert_eq!(pos, ChunkPos::new(1, 1));
 
         // Negative chunks
-        let pos = ChunkPos::from_world(Vec2::new(-256.0, -256.0), chunk_pixel_size);
+        let pos = ChunkPos::from_world(Vec2::new(-1024.0, -1024.0), chunk_pixel_size);
         assert_eq!(pos, ChunkPos::new(-1, -1));
     }
 

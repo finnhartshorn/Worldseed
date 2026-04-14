@@ -7,14 +7,17 @@ pub const CHUNK_AREA: usize = CHUNK_SIZE * CHUNK_SIZE; // 1,024 tiles
 /// Size of each chunk as i32 for coordinate calculations
 pub const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
 
-/// Pixel size of each tile (Minifantasy uses 8x8 pixels)
-pub const TILE_SIZE: f32 = 8.0;
-
-/// Pixel size of each chunk
-pub const CHUNK_PIXEL_SIZE: f32 = TILE_SIZE * CHUNK_SIZE as f32; // 256 pixels
-
 /// Display size for tiles in the tilemap (we'll scale 8x8 to 32x32 for visibility)
 pub const TILE_DISPLAY_SIZE: u32 = 32;
+
+/// Source asset size of each tile in pixels
+pub const TILE_SOURCE_SIZE: f32 = 8.0;
+
+/// World-space size of each rendered tile
+pub const TILE_WORLD_SIZE: f32 = TILE_DISPLAY_SIZE as f32;
+
+/// World-space size of each rendered chunk
+pub const CHUNK_PIXEL_SIZE: f32 = TILE_WORLD_SIZE * CHUNK_SIZE as f32; // 1024 world units
 
 // Layer configuration
 /// Number of tile layers per chunk

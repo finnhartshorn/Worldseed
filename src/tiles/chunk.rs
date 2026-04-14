@@ -154,10 +154,11 @@ pub mod coords {
 
     /// Convert world position to local tile position within chunk (0-31, 0-31)
     pub fn world_to_local_tile(world_pos: Vec2) -> (usize, usize) {
-        let tile_x = (world_pos.x / TILE_SIZE).floor() as i32;
-        let tile_y = (world_pos.y / TILE_SIZE).floor() as i32;
+        let tile_x = (world_pos.x / TILE_WORLD_SIZE).floor() as i32;
+        let tile_y = (world_pos.y / TILE_WORLD_SIZE).floor() as i32;
         let local_x = tile_x.rem_euclid(CHUNK_SIZE_I32) as usize;
-        let local_y = tile_y.rem_euclid(CHUNK_SIZE_I32) as usize;
+        let local_y_from_bottom = tile_y.rem_euclid(CHUNK_SIZE_I32) as usize;
+        let local_y = CHUNK_SIZE - 1 - local_y_from_bottom;
         (local_x, local_y)
     }
 }
@@ -192,12 +193,12 @@ mod tests {
 
     #[test]
     fn test_world_to_local_tile() {
-        // Position in first chunk, middle tile
+        // Position in first chunk, 5th tile from the left and bottom.
         let (x, y) = coords::world_to_local_tile(Vec2::new(128.0, 128.0));
-        assert_eq!((x, y), (16, 16)); // 128 / 8 = 16
+        assert_eq!((x, y), (4, 27)); // X counts from left, Y is flipped because tilemap row 0 is top
 
-        // Position in negative chunk
-        let (x, y) = coords::world_to_local_tile(Vec2::new(-8.0, -8.0));
-        assert_eq!((x, y), (31, 31)); // Wraps to last tile
+        // Position in negative chunk near the top-left corner of the chunk.
+        let (x, y) = coords::world_to_local_tile(Vec2::new(-32.0, -32.0));
+        assert_eq!((x, y), (31, 0));
     }
 }
