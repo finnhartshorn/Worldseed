@@ -1,6 +1,9 @@
 use bevy::{
-    input::mouse::MouseWheel, picking::pointer::PointerButton, prelude::*,
-    sprite_render::TilemapChunk, window::PrimaryWindow,
+    camera_controller::pan_camera::{PanCamera, PanCameraPlugin},
+    input::mouse::MouseWheel,
+    picking::pointer::PointerButton,
+    prelude::*,
+    window::PrimaryWindow,
 };
 
 mod entities;
@@ -16,7 +19,7 @@ use entities::{
 };
 use map::MapPlugin;
 use tiles::constants::{LAYER_GROUND, TILE_DIRT, TILE_GRASS};
-use world::{loader, manager::ChunkDataChanged, WorldManager};
+use world::{loader, WorldManager};
 
 // UI sprite vertical offsets for proper centering
 const HUMAN_SPRITE_OFFSET: f32 = 1.0;
@@ -149,6 +152,7 @@ struct SaveNotificationText;
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
+        .add_plugins(PanCameraPlugin)
         .add_plugins(MapPlugin)
         .init_resource::<WorldManager>()
         .init_resource::<loader::ChunkSaveTimer>()
@@ -161,8 +165,6 @@ fn main() {
         .add_systems(
             Update,
             (
-                // Asset and rendering updates
-                update_tileset_image,
                 // AI behaviors (before velocity application)
                 update_roaming_behavior,
                 update_winding_path,
@@ -179,8 +181,6 @@ fn main() {
                 update_tree_growth,
                 // Animation
                 animate_sprite,
-                // Camera controls
-                move_camera,
                 zoom_camera,
                 // loader::update_tilemap,
             ),
@@ -213,7 +213,25 @@ fn setup_world(
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
     // Spawn camera at origin
-    commands.spawn((Camera2d, Transform::from_xyz(0.0, 0.0, 999.0)));
+    commands.spawn((
+        Camera2d,
+        Transform::from_xyz(0.0, 0.0, 999.0),
+        PanCamera {
+            min_zoom: 1.0,
+            max_zoom: 1.0,
+            zoom_factor: 1.0,
+            key_up: Some(KeyCode::ArrowUp),
+            key_down: Some(KeyCode::ArrowDown),
+            key_left: Some(KeyCode::ArrowLeft),
+            key_right: Some(KeyCode::ArrowRight),
+            key_zoom_in: None,
+            key_zoom_out: None,
+            key_rotate_ccw: None,
+            key_rotate_cw: None,
+            pan_speed: 200.0,
+            ..default()
+        },
+    ));
 
     // Spawn player character at world origin
     spawn_player(
@@ -253,53 +271,7 @@ fn setup_world(
     info!("World setup complete with entities using position and state components");
 }
 
-fn update_tileset_image(
-    chunk_query: Query<&TilemapChunk>,
-    mut events: MessageReader<AssetEvent<Image>>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    for event in events.read() {
-        // Check if any chunk uses this texture
-        for chunk in chunk_query.iter() {
-            if event.is_loaded_with_dependencies(chunk.tileset.id()) {
-                if let Some(image) = images.get_mut(&chunk.tileset) {
-                    // Reinterpret the vertically-stacked texture as an array texture with 2 layers
-                    // terrain_array.png is 8x16 (two 8x8 tiles stacked)
-                    image.reinterpret_stacked_2d_as_array(2);
-                    info!("Tileset reinterpreted as 2-layer array texture");
-                }
-                break; // Only need to reinterpret once per texture
-            }
-        }
-    }
-}
-
-/// Camera movement system for testing chunk loading
-fn move_camera(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    mut camera_query: Query<&mut Transform, With<Camera2d>>,
-) {
-    if let Ok(mut transform) = camera_query.single_mut() {
-        let speed = 200.0; // pixels per second
-        let delta = time.delta_secs();
-
-        if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
-            transform.translation.y += speed * delta;
-        }
-        if keyboard.pressed(KeyCode::KeyS) || keyboard.pressed(KeyCode::ArrowDown) {
-            transform.translation.y -= speed * delta;
-        }
-        if keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::ArrowLeft) {
-            transform.translation.x -= speed * delta;
-        }
-        if keyboard.pressed(KeyCode::KeyD) || keyboard.pressed(KeyCode::ArrowRight) {
-            transform.translation.x += speed * delta;
-        }
-    }
-}
-
-/// Camera zoom system - supports scroll wheel and keyboard (- and = keys)
+/// Orthographic zoom avoids camera transform scaling issues with tilemap rendering.
 fn zoom_camera(
     mut scroll_events: MessageReader<MouseWheel>,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -308,12 +280,10 @@ fn zoom_camera(
     if let Ok(mut projection) = camera_query.single_mut() {
         let mut zoom_delta = 0.0;
 
-        // Handle scroll wheel input
         for event in scroll_events.read() {
             zoom_delta -= event.y * ZOOM_SPEED;
         }
 
-        // Handle keyboard input (- to zoom out, = to zoom in)
         if keyboard.just_pressed(KeyCode::Minus) {
             zoom_delta += ZOOM_SPEED;
         }
@@ -321,7 +291,6 @@ fn zoom_camera(
             zoom_delta -= ZOOM_SPEED;
         }
 
-        // Apply zoom delta and clamp to bounds
         if zoom_delta != 0.0 {
             if let Projection::Orthographic(ref mut ortho) = projection.as_mut() {
                 ortho.scale = (ortho.scale + zoom_delta).clamp(ZOOM_MIN, ZOOM_MAX);
@@ -374,11 +343,11 @@ fn setup_ui(
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         padding: UiRect::all(Val::Px(0.0)),
+                        border_radius: BorderRadius::all(Val::Px(4.0)),
                         ..default()
                     },
                     BackgroundColor(Color::srgb(0.2, 0.2, 0.3)),
                     BorderColor::all(Color::srgb(0.4, 0.4, 0.6)),
-                    BorderRadius::all(Val::Px(4.0)),
                 ))
                 .observe(button_interaction)
                 .with_children(|button| {
@@ -425,11 +394,11 @@ fn setup_ui(
                             justify_content: JustifyContent::Center,
                             align_items: AlignItems::Center,
                             padding: UiRect::all(Val::Px(0.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
                             ..default()
                         },
                         BackgroundColor(Color::srgb(0.15, 0.3, 0.15)),
                         BorderColor::all(Color::srgb(0.3, 0.6, 0.3)),
-                        BorderRadius::all(Val::Px(4.0)),
                     ))
                     .observe(button_interaction)
                     .observe(guardian_button_right_click)
@@ -495,11 +464,11 @@ fn setup_ui(
                                         justify_content: JustifyContent::Center,
                                         align_items: AlignItems::Center,
                                         padding: UiRect::all(Val::Px(0.0)),
+                                        border_radius: BorderRadius::all(Val::Px(4.0)),
                                         ..default()
                                     },
                                     BackgroundColor(Color::srgb(0.15, 0.3, 0.15)),
                                     BorderColor::all(Color::srgb(0.3, 0.6, 0.3)),
-                                    BorderRadius::all(Val::Px(4.0)),
                                 ))
                                 .observe(button_interaction)
                                 .with_children(|button| {
@@ -540,11 +509,11 @@ fn setup_ui(
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         padding: UiRect::all(Val::Px(0.0)),
+                        border_radius: BorderRadius::all(Val::Px(4.0)),
                         ..default()
                     },
                     BackgroundColor(Color::srgb(0.25, 0.2, 0.25)),
                     BorderColor::all(Color::srgb(0.5, 0.4, 0.5)),
-                    BorderRadius::all(Val::Px(4.0)),
                 ))
                 .observe(button_interaction)
                 .with_children(|button| {
@@ -599,11 +568,11 @@ fn setup_ui(
                             justify_content: JustifyContent::Center,
                             align_items: AlignItems::Center,
                             padding: UiRect::all(Val::Px(0.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
                             ..default()
                         },
                         BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
                         BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
-                        BorderRadius::all(Val::Px(4.0)),
                     ))
                     .observe(terrain_button_interaction)
                     .observe(terrain_button_right_click)
@@ -650,11 +619,11 @@ fn setup_ui(
                                     justify_content: JustifyContent::Center,
                                     align_items: AlignItems::Center,
                                     padding: UiRect::all(Val::Px(0.0)),
+                                    border_radius: BorderRadius::all(Val::Px(4.0)),
                                     ..default()
                                 },
                                 BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
                                 BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
-                                BorderRadius::all(Val::Px(4.0)),
                             ))
                             .observe(terrain_button_interaction)
                             .with_children(|button| {
@@ -688,11 +657,11 @@ fn setup_ui(
                                     justify_content: JustifyContent::Center,
                                     align_items: AlignItems::Center,
                                     padding: UiRect::all(Val::Px(0.0)),
+                                    border_radius: BorderRadius::all(Val::Px(4.0)),
                                     ..default()
                                 },
                                 BackgroundColor(Color::srgb(0.2, 0.3, 0.2)),
                                 BorderColor::all(Color::srgb(0.4, 0.6, 0.4)),
-                                BorderRadius::all(Val::Px(4.0)),
                             ))
                             .observe(terrain_button_interaction)
                             .with_children(|button| {
@@ -995,7 +964,7 @@ fn handle_entity_placement(
     };
 
     // Get camera components
-    let Ok((camera, camera_transform, projection)) = camera_query.single() else {
+    let Ok((camera, camera_transform, _projection)) = camera_query.single() else {
         return;
     };
 

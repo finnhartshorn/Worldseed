@@ -1,11 +1,15 @@
 use super::{generator, manager::WorldManager, serialization};
 use crate::tiles::{
-    chunk::coords, Chunk, ChunkData, ChunkPos, DirtyChunk, CHUNK_LOAD_RADIUS, CHUNK_UNLOAD_RADIUS,
+    chunk::coords, Chunk, ChunkData, ChunkPos, DirtyChunk, CHUNK_LOAD_RADIUS,
     TILE_DISPLAY_SIZE,
 };
 use bevy::prelude::*;
 use bevy::sprite_render::{TileData, TilemapChunk, TilemapChunkTileData};
-use rand::prelude::*;
+use bevy::{
+    image::{ImageArrayLayout, ImageLoaderSettings},
+    prelude::On,
+};
+#[cfg(feature = "debug_chunks")]
 use std::collections::HashSet;
 
 #[derive(Component, Deref, DerefMut)]
@@ -97,6 +101,12 @@ pub fn load_chunks_around_camera(
     let chunks_to_load = camera_chunk.chunks_in_radius(load_radius);
     #[cfg(feature = "debug_chunks")]
     let has_loaded_chunks = !chunks_to_load.is_empty();
+    let tileset = asset_server.load_with_settings(
+        "tilesets/terrain_array.png",
+        |settings: &mut ImageLoaderSettings| {
+            settings.array_layout = Some(ImageArrayLayout::RowCount { rows: 2 });
+        },
+    );
 
     for chunk_pos in chunks_to_load {
         // Skip if already loaded
@@ -122,7 +132,7 @@ pub fn load_chunks_around_camera(
                     TilemapChunk {
                         chunk_size: UVec2::splat(crate::tiles::CHUNK_SIZE as u32),
                         tile_display_size: UVec2::splat(TILE_DISPLAY_SIZE),
-                        tileset: asset_server.load("tilesets/terrain_array.png"),
+                        tileset: tileset.clone(),
                         ..default()
                     },
                     TilemapChunkTileData(tile_data),
@@ -183,7 +193,7 @@ pub fn unload_distant_chunks(
     #[cfg(feature = "debug_chunks")]
     let has_unloaded_chunks = !chunks_to_unload.is_empty();
 
-    for (entity, chunk_pos) in chunks_to_unload {
+    for (_entity, chunk_pos) in chunks_to_unload {
         // Note: entity is just one layer entity, we need to despawn all layers
         // Save if dirty
         if world.is_dirty(&chunk_pos) {
@@ -348,7 +358,7 @@ pub fn apply_tile_modifications(
 /// Observer system that syncs visual tilemap entities when chunk data changes
 /// This creates a clean separation: data layer (ChunkData) -> event -> visual layer (TilemapChunk)
 pub fn sync_chunk_visuals_on_data_change(
-    trigger: Trigger<super::manager::ChunkDataChanged>,
+    trigger: On<super::manager::ChunkDataChanged>,
     world: Res<WorldManager>,
     mut chunk_query: Query<(&Chunk, &mut TilemapChunkTileData)>,
 ) {
@@ -600,6 +610,8 @@ pub fn update_tilemap(
     time: Res<Time>,
     mut query: Query<(&mut TilemapChunkTileData, &mut UpdateTimer)>,
 ) {
+    use rand::prelude::*;
+
     let mut rng = rand::rng();
     for (mut tile_data, mut timer) in query.iter_mut() {
         timer.tick(time.delta());

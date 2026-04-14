@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy::input::keyboard::KeyCode;
 use super::{MapModal, MapState, MapConfig, MapContent, MAP_TILE_SIZE, MAP_TILESET_COLS, MAP_TILESET_ROWS, MAP_TILE_GRASS_PLAIN, MAP_TILE_DIRT, MAP_TILE_UNKNOWN};
 use crate::world::WorldManager;
-use crate::tiles::{ChunkPos, TILE_GRASS, TILE_DIRT, LAYER_GROUND, CHUNK_AREA};
+use crate::tiles::{ChunkPos, TILE_GRASS, TILE_DIRT, LAYER_GROUND};
 use std::collections::HashMap;
 
 /// Toggles map visibility when 'M' key is pressed

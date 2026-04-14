@@ -157,8 +157,7 @@ pub mod coords {
         let tile_x = (world_pos.x / TILE_WORLD_SIZE).floor() as i32;
         let tile_y = (world_pos.y / TILE_WORLD_SIZE).floor() as i32;
         let local_x = tile_x.rem_euclid(CHUNK_SIZE_I32) as usize;
-        let local_y_from_bottom = tile_y.rem_euclid(CHUNK_SIZE_I32) as usize;
-        let local_y = CHUNK_SIZE - 1 - local_y_from_bottom;
+        let local_y = tile_y.rem_euclid(CHUNK_SIZE_I32) as usize;
         (local_x, local_y)
     }
 }
@@ -195,10 +194,10 @@ mod tests {
     fn test_world_to_local_tile() {
         // Position in first chunk, 5th tile from the left and bottom.
         let (x, y) = coords::world_to_local_tile(Vec2::new(128.0, 128.0));
-        assert_eq!((x, y), (4, 27)); // X counts from left, Y is flipped because tilemap row 0 is top
+        assert_eq!((x, y), (4, 4));
 
         // Position in negative chunk near the top-left corner of the chunk.
         let (x, y) = coords::world_to_local_tile(Vec2::new(-32.0, -32.0));
-        assert_eq!((x, y), (31, 0));
+        assert_eq!((x, y), (31, 31));
     }
 }
