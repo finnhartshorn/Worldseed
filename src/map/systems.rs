@@ -1,8 +1,11 @@
-use bevy::prelude::*;
-use bevy::input::keyboard::KeyCode;
-use super::{MapModal, MapState, MapConfig, MapContent, MAP_TILE_SIZE, MAP_TILESET_COLS, MAP_TILESET_ROWS, MAP_TILE_GRASS_PLAIN, MAP_TILE_DIRT, MAP_TILE_UNKNOWN};
+use super::{
+    MapConfig, MapContent, MapModal, MapState, MAP_TILESET_COLS, MAP_TILESET_ROWS, MAP_TILE_DIRT,
+    MAP_TILE_GRASS_PLAIN, MAP_TILE_SIZE, MAP_TILE_UNKNOWN,
+};
+use crate::tiles::{ChunkPos, LAYER_GROUND, TILE_DIRT, TILE_GRASS};
 use crate::world::WorldManager;
-use crate::tiles::{ChunkPos, TILE_GRASS, TILE_DIRT, LAYER_GROUND};
+use bevy::input::keyboard::KeyCode;
+use bevy::prelude::*;
 use std::collections::HashMap;
 
 /// Toggles map visibility when 'M' key is pressed
@@ -38,8 +41,7 @@ pub fn update_map_display(
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
     // Update when map is visible AND (map state changed OR world changed)
-    let should_update = map_state.visible &&
-        (map_state.is_changed() || world_manager.is_changed());
+    let should_update = map_state.visible && (map_state.is_changed() || world_manager.is_changed());
 
     if !should_update {
         return;
@@ -73,47 +75,47 @@ pub fn update_map_display(
     // Render map tiles using actual sprites
     commands.entity(map_content).with_children(|parent| {
         // Create a grid container for map tiles
-        parent.spawn((
-            Node {
+        parent
+            .spawn((Node {
                 display: Display::Grid,
                 grid_template_columns: vec![GridTrack::auto(); (max_x - min_x + 1) as usize],
                 grid_template_rows: vec![GridTrack::auto(); (max_y - min_y + 1) as usize],
                 column_gap: Val::Px(0.0),
                 row_gap: Val::Px(0.0),
                 ..default()
-            },
-        )).with_children(|grid| {
-            // Render tiles from top to bottom, left to right
-            for y in (min_y..=max_y).rev() {
-                for x in min_x..=max_x {
-                    let map_pos = MapTilePos { x, y };
-                    let tile_index = if let Some(chunks) = map_tiles.get(&map_pos) {
-                        // Loaded chunks - analyze terrain to determine map tile
-                        determine_map_tile_from_chunks(chunks, &world_manager)
-                    } else {
-                        // Unloaded/unknown - use deep water for unexplored areas
-                        MAP_TILE_UNKNOWN
-                    };
+            },))
+            .with_children(|grid| {
+                // Render tiles from top to bottom, left to right
+                for y in (min_y..=max_y).rev() {
+                    for x in min_x..=max_x {
+                        let map_pos = MapTilePos { x, y };
+                        let tile_index = if let Some(chunks) = map_tiles.get(&map_pos) {
+                            // Loaded chunks - analyze terrain to determine map tile
+                            determine_map_tile_from_chunks(chunks, &world_manager)
+                        } else {
+                            // Unloaded/unknown - use deep water for unexplored areas
+                            MAP_TILE_UNKNOWN
+                        };
 
-                    grid.spawn((
-                        MapTile,
-                        ImageNode {
-                            image: texture.clone(),
-                            texture_atlas: Some(TextureAtlas {
-                                layout: texture_atlas_layout.clone(),
-                                index: tile_index,
-                            }),
-                            ..default()
-                        },
-                        Node {
-                            width: Val::Px(MAP_TILE_SIZE),
-                            height: Val::Px(MAP_TILE_SIZE),
-                            ..default()
-                        },
-                    ));
+                        grid.spawn((
+                            MapTile,
+                            ImageNode {
+                                image: texture.clone(),
+                                texture_atlas: Some(TextureAtlas {
+                                    layout: texture_atlas_layout.clone(),
+                                    index: tile_index,
+                                }),
+                                ..default()
+                            },
+                            Node {
+                                width: Val::Px(MAP_TILE_SIZE),
+                                height: Val::Px(MAP_TILE_SIZE),
+                                ..default()
+                            },
+                        ));
+                    }
                 }
-            }
-        });
+            });
 
         // Add map legend/info
         parent.spawn((
@@ -156,7 +158,8 @@ fn convert_chunks_to_map_tiles(
         let map_y = chunk_pos.y.div_euclid(divisor);
         let map_pos = MapTilePos { x: map_x, y: map_y };
 
-        map_tiles.entry(map_pos)
+        map_tiles
+            .entry(map_pos)
             .or_insert_with(Vec::new)
             .push(*chunk_pos);
     }

@@ -1,21 +1,14 @@
-use crate::tiles::{ChunkData, ChunkPos, TILE_GRASS, TILE_DIRT, CHUNK_SIZE, LAYER_GROUND};
+use crate::tiles::{ChunkData, ChunkPos, CHUNK_SIZE, LAYER_GROUND, TILE_GRASS};
 
-/// Generate a new chunk at the given position
-/// Generates a checkerboard pattern of grass and dirt tiles
+/// Generate a new chunk at the given position with all grass terrain
 pub fn generate_chunk(position: ChunkPos) -> ChunkData {
     // Start with empty chunk
     let mut chunk = ChunkData::empty(position);
 
-    // Create checkerboard pattern on ground layer
+    // Fill with all grass terrain on ground layer
     for y in 0..CHUNK_SIZE {
         for x in 0..CHUNK_SIZE {
-            // Alternate between grass and dirt based on tile coordinates
-            let tile = if (x + y) % 2 == 0 {
-                TILE_GRASS
-            } else {
-                TILE_DIRT
-            };
-            chunk.set_tile(LAYER_GROUND, x, y, tile);
+            chunk.set_tile(LAYER_GROUND, x, y, TILE_GRASS);
         }
     }
 

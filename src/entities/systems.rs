@@ -1,19 +1,26 @@
-use super::spawning::{spawn_tree_spirit, update_animation_for_direction, AnimationTimer};
+use super::spawning::{
+    spawn_tree_spirit, spawn_variant_tree, update_animation_for_direction, AnimationTimer,
+};
 use super::{
-    AnimationIndices, Direction, EntityState, ForestGuardian, GrowingTree, Position,
-    RoamingBehavior, Snail, TreeSpawner, TreeSpirit, TreeVariant, Velocity, WindingPath,
+    AnimationIndices, Direction, EntityState, ForestGuardian, GuardianAnimations, GrowingTree,
+    Position, RoamingBehavior, Snail, TreeSpawner, TreeVariant, Velocity, WindingPath,
+    WorldRenderDepth,
 };
 use crate::tiles::TILE_DIRT;
 use crate::world::WorldManager;
 use bevy::prelude::*;
 
-/// Syncs entity Position component with Transform for rendering
-pub fn sync_position_with_transform(
-    mut query: Query<(&Position, &mut Transform), Changed<Position>>,
+/// Syncs world positions into sprite transforms and assigns deterministic depth.
+pub fn sync_world_render_transform(
+    mut query: Query<
+        (&Position, &WorldRenderDepth, &mut Transform),
+        Or<(Changed<Position>, Changed<WorldRenderDepth>)>,
+    >,
 ) {
-    for (position, mut transform) in &mut query {
+    for (position, render_depth, mut transform) in &mut query {
         transform.translation.x = position.x;
         transform.translation.y = position.y;
+        transform.translation.z = render_depth.z_for_position(position);
     }
 }
 
@@ -23,6 +30,162 @@ pub fn apply_velocity(time: Res<Time>, mut query: Query<(&mut Position, &Velocit
     for (mut position, velocity) in &mut query {
         position.x += velocity.x * delta;
         position.y += velocity.y * delta;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::entities::{
+        update_guardian_animation_from_state, AnimationIndices, Direction, EntityState,
+        GuardianAnimations, Position, RenderStratum, WorldRenderDepth,
+    };
+    use bevy::prelude::*;
+
+    #[test]
+    fn southern_positions_render_in_front() {
+        let north = Position::new(0.0, 64.0);
+        let south = Position::new(0.0, -64.0);
+        let depth = WorldRenderDepth::new(RenderStratum::WorldObject);
+
+        assert!(depth.z_for_position(&south) > depth.z_for_position(&north));
+    }
+
+    #[test]
+    fn strata_are_non_overlapping() {
+        let position = Position::new(0.0, 0.0);
+        let ground = WorldRenderDepth::new(RenderStratum::Ground);
+        let world = WorldRenderDepth::new(RenderStratum::WorldObject);
+        let overlay = WorldRenderDepth::new(RenderStratum::Overlay);
+
+        assert!(ground.z_for_position(&position) < world.z_for_position(&position));
+        assert!(world.z_for_position(&position) < overlay.z_for_position(&position));
+    }
+
+    #[test]
+    fn depth_bias_breaks_same_position_ties_deterministically() {
+        let position = Position::new(10.0, 10.0);
+        let base = WorldRenderDepth::new(RenderStratum::WorldObject);
+        let biased = WorldRenderDepth::with_bias(RenderStratum::WorldObject, 0.0004);
+
+        assert!(biased.z_for_position(&position) > base.z_for_position(&position));
+    }
+
+    #[test]
+    fn large_world_positions_stay_within_world_object_stratum() {
+        let far_north = Position::new(0.0, 100_000.0);
+        let far_south = Position::new(0.0, -100_000.0);
+        let decoration = WorldRenderDepth::new(RenderStratum::Decoration);
+        let world = WorldRenderDepth::new(RenderStratum::WorldObject);
+        let overlay = WorldRenderDepth::new(RenderStratum::Overlay);
+
+        assert!(decoration.z_for_position(&far_north) < world.z_for_position(&far_north));
+        assert!(world.z_for_position(&far_north) < overlay.z_for_position(&far_north));
+        assert!(decoration.z_for_position(&far_south) < world.z_for_position(&far_south));
+        assert!(world.z_for_position(&far_south) < overlay.z_for_position(&far_south));
+    }
+
+    #[test]
+    fn guardian_state_switch_preserves_direction_row_for_walk_animation() {
+        let mut app = App::new();
+        app.add_systems(Update, update_guardian_animation_from_state);
+
+        let idle_layout = Handle::<TextureAtlasLayout>::default();
+        let walk_layout = Handle::<TextureAtlasLayout>::default();
+        let idle_texture = Handle::<Image>::default();
+        let walk_texture = Handle::<Image>::default();
+
+        let entity = app.world_mut().spawn((
+            EntityState::Moving,
+            Direction::NorthWest,
+            GuardianAnimations {
+                idle_texture: idle_texture.clone(),
+                idle_layout: idle_layout.clone(),
+                walk_texture: walk_texture.clone(),
+                walk_layout: walk_layout.clone(),
+                idle_frames: 8,
+                walk_frames: 6,
+                current_state: EntityState::Idle,
+            },
+            Sprite::from_atlas_image(
+                idle_texture,
+                TextureAtlas {
+                    layout: idle_layout,
+                    index: 27,
+                },
+            ),
+            AnimationIndices::new(24, 31),
+        )).id();
+
+        app.update();
+
+        let mut query = app
+            .world_mut()
+            .query::<(&Sprite, &AnimationIndices, &GuardianAnimations)>();
+        let (sprite, indices, animations) = query
+            .get(app.world(), entity)
+            .expect("guardian components should exist");
+
+        assert_eq!(animations.current_state, EntityState::Moving);
+        assert_eq!(sprite.image, walk_texture);
+        assert_eq!(
+            sprite.texture_atlas.as_ref().map(|atlas| atlas.layout.clone()),
+            Some(walk_layout)
+        );
+        assert_eq!(sprite.texture_atlas.as_ref().map(|atlas| atlas.index), Some(18));
+        assert_eq!(indices.first, 18);
+        assert_eq!(indices.last, 23);
+    }
+
+    #[test]
+    fn guardian_state_switch_preserves_direction_row_for_idle_animation() {
+        let mut app = App::new();
+        app.add_systems(Update, update_guardian_animation_from_state);
+
+        let idle_layout = Handle::<TextureAtlasLayout>::default();
+        let walk_layout = Handle::<TextureAtlasLayout>::default();
+        let idle_texture = Handle::<Image>::default();
+        let walk_texture = Handle::<Image>::default();
+
+        let entity = app.world_mut().spawn((
+            EntityState::Idle,
+            Direction::SouthWest,
+            GuardianAnimations {
+                idle_texture: idle_texture.clone(),
+                idle_layout: idle_layout.clone(),
+                walk_texture: walk_texture.clone(),
+                walk_layout: walk_layout.clone(),
+                idle_frames: 8,
+                walk_frames: 6,
+                current_state: EntityState::Moving,
+            },
+            Sprite::from_atlas_image(
+                walk_texture,
+                TextureAtlas {
+                    layout: walk_layout,
+                    index: 11,
+                },
+            ),
+            AnimationIndices::new(6, 11),
+        )).id();
+
+        app.update();
+
+        let mut query = app
+            .world_mut()
+            .query::<(&Sprite, &AnimationIndices, &GuardianAnimations)>();
+        let (sprite, indices, animations) = query
+            .get(app.world(), entity)
+            .expect("guardian components should exist");
+
+        assert_eq!(animations.current_state, EntityState::Idle);
+        assert_eq!(sprite.image, idle_texture);
+        assert_eq!(
+            sprite.texture_atlas.as_ref().map(|atlas| atlas.layout.clone()),
+            Some(idle_layout)
+        );
+        assert_eq!(sprite.texture_atlas.as_ref().map(|atlas| atlas.index), Some(8));
+        assert_eq!(indices.first, 8);
+        assert_eq!(indices.last, 15);
     }
 }
 
@@ -50,6 +213,54 @@ pub fn update_state_from_velocity(mut query: Query<(&Velocity, &mut EntityState)
                 } else {
                     *state = EntityState::Idle;
                 }
+            }
+        }
+    }
+}
+
+/// Updates forest guardian animations based on entity state
+/// Switches between idle and walk animations when EntityState changes
+pub fn update_guardian_animation_from_state(
+    mut query: Query<(
+        &EntityState,
+        &Direction,
+        &mut GuardianAnimations,
+        &mut Sprite,
+        &mut AnimationIndices,
+    )>,
+) {
+    for (state, direction, mut animations, mut sprite, mut indices) in &mut query {
+        // Only switch if state has changed
+        if animations.current_state != *state {
+            animations.current_state = *state;
+
+            match *state {
+                EntityState::Idle => {
+                    // Switch to idle animation
+                    if let Some(atlas) = &mut sprite.texture_atlas {
+                        atlas.layout = animations.idle_layout.clone();
+                    }
+                    sprite.image = animations.idle_texture.clone();
+                    // Keep the current facing row when changing animation state.
+                    update_animation_for_direction(*direction, &mut indices, animations.idle_frames);
+                }
+                EntityState::Moving => {
+                    // Switch to walk animation
+                    if let Some(atlas) = &mut sprite.texture_atlas {
+                        atlas.layout = animations.walk_layout.clone();
+                    }
+                    sprite.image = animations.walk_texture.clone();
+                    // Keep the current facing row when changing animation state.
+                    update_animation_for_direction(*direction, &mut indices, animations.walk_frames);
+                }
+                EntityState::Attacking | EntityState::Dead => {
+                    // For now, keep current animation for attacking/dead states
+                    // Could be extended with attack/death animations later
+                }
+            }
+
+            if let Some(atlas) = &mut sprite.texture_atlas {
+                atlas.index = indices.first;
             }
         }
     }
@@ -266,35 +477,31 @@ pub fn snail_dirt_trail(
     }
 }
 
-/// Advances tree growth through stages over time
+/// Advances tree growth through stages over time.
+/// Works for any entity with a GrowingTree component (tree spirits, RTS trees, etc.)
 pub fn update_tree_growth(
     time: Res<Time>,
-    mut tree_query: Query<(&mut GrowingTree, &mut Transform), With<TreeSpirit>>,
+    mut tree_query: Query<(&mut GrowingTree, &mut Transform)>,
 ) {
     let delta = time.delta_secs();
 
     for (mut growing_tree, mut transform) in tree_query.iter_mut() {
-        // Skip if already mature
         if growing_tree.is_mature() {
             continue;
         }
 
-        // Accumulate time in current stage
         growing_tree.time_in_stage += delta;
 
-        // Check if ready to advance to next stage
         if growing_tree.time_in_stage >= growing_tree.time_to_next_stage {
             if let Some(next_stage) = growing_tree.stage.next() {
-                // Advance to next stage
                 growing_tree.stage = next_stage;
                 growing_tree.time_in_stage = 0.0;
 
-                // Update scale based on new stage
-                let new_scale = next_stage.scale();
+                let new_scale = growing_tree.base_scale * next_stage.scale();
                 transform.scale = Vec3::splat(new_scale);
 
                 info!(
-                    "Tree advanced to stage {:?} with scale {:.1}",
+                    "Tree advanced to stage {:?} (scale {:.2})",
                     next_stage, new_scale
                 );
             }
@@ -377,35 +584,74 @@ pub fn update_tree_spawning(
                 }
             };
 
-            // Spawn the tree
-            spawn_tree_spirit(
-                &mut commands,
-                Position::new(spawn_x, spawn_y),
-                tree_variant,
-                spawner.tree_growth_time,
-                &assets,
-                &mut texture_atlas_layouts,
-            );
+            // Randomly choose between variant tree (90%) or tree spirit (10%)
+            let mut hasher_type = hasher_builder.build_hasher();
+            (hash2.wrapping_add(42)).hash(&mut hasher_type);
+            let hash_type = hasher_type.finish();
+            let rand_type = (hash_type as f32) / (u64::MAX as f32);
 
-            if let Some(guardian) = guardian {
-                let is_matching = tree_variant == guardian.variant;
-                info!(
-                    "{:?} guardian spawned {:?} tree at ({:.1}, {:.1}) {}",
-                    guardian.variant,
+            let spawn_pos = Position::new(spawn_x, spawn_y);
+            if rand_type < 0.9 {
+                // Spawn variant tree with matching tree type (90%)
+                spawn_variant_tree(
+                    &mut commands,
+                    spawn_pos,
                     tree_variant,
-                    spawn_x,
-                    spawn_y,
-                    if is_matching {
-                        "(matching)"
-                    } else {
-                        "(different!)"
-                    }
+                    spawner.tree_growth_time,
+                    &assets,
                 );
+
+                if let Some(guardian) = guardian {
+                    let is_matching = tree_variant == guardian.variant;
+                    info!(
+                        "{:?} guardian spawned {:?} variant tree at ({:.1}, {:.1}) {}",
+                        guardian.variant,
+                        tree_variant,
+                        spawn_x,
+                        spawn_y,
+                        if is_matching {
+                            "(matching)"
+                        } else {
+                            "(different!)"
+                        }
+                    );
+                } else {
+                    info!(
+                        "Entity spawned {:?} variant tree at ({:.1}, {:.1})",
+                        tree_variant, spawn_x, spawn_y
+                    );
+                }
             } else {
-                info!(
-                    "Entity spawned {:?} tree at ({:.1}, {:.1})",
-                    tree_variant, spawn_x, spawn_y
+                // Spawn animated tree spirit (10%)
+                spawn_tree_spirit(
+                    &mut commands,
+                    spawn_pos,
+                    tree_variant,
+                    spawner.tree_growth_time,
+                    &assets,
+                    &mut texture_atlas_layouts,
                 );
+
+                if let Some(guardian) = guardian {
+                    let is_matching = tree_variant == guardian.variant;
+                    info!(
+                        "{:?} guardian spawned {:?} tree spirit at ({:.1}, {:.1}) {}",
+                        guardian.variant,
+                        tree_variant,
+                        spawn_x,
+                        spawn_y,
+                        if is_matching {
+                            "(matching)"
+                        } else {
+                            "(different!)"
+                        }
+                    );
+                } else {
+                    info!(
+                        "Entity spawned {:?} tree spirit at ({:.1}, {:.1})",
+                        tree_variant, spawn_x, spawn_y
+                    );
+                }
             }
 
             // Reset spawn timer with random interval

@@ -1,10 +1,10 @@
 mod constants;
-mod ui;
 mod systems;
+mod ui;
 
 pub use constants::*;
-pub use ui::*;
 pub use systems::*;
+pub use ui::*;
 
 use bevy::prelude::*;
 
@@ -16,10 +16,7 @@ impl Plugin for MapPlugin {
         app.init_resource::<MapConfig>()
             .init_resource::<MapState>()
             .add_systems(Startup, setup_map_ui)
-            .add_systems(Update, (
-                toggle_map_visibility,
-                update_map_display,
-            ));
+            .add_systems(Update, (toggle_map_visibility, update_map_display));
     }
 }
 

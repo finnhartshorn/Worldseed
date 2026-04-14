@@ -1,10 +1,8 @@
 use bevy::{
-    camera_controller::pan_camera::{PanCamera, PanCameraPlugin},
-    input::mouse::MouseWheel,
-    picking::pointer::PointerButton,
-    prelude::*,
-    window::PrimaryWindow,
+    input::mouse::MouseWheel, picking::pointer::PointerButton, prelude::*,
+    sprite::Anchor, sprite_render::TilemapChunk, window::PrimaryWindow,
 };
+use std::fs;
 
 mod entities;
 mod map;
@@ -13,12 +11,13 @@ mod world;
 
 use entities::{
     animate_sprite, apply_velocity, snail_dirt_trail, spawn_forest_guardian, spawn_player,
-    spawn_snail, spawn_tree_spirit, sync_position_with_transform, update_animation_from_direction,
-    update_direction_from_velocity, update_roaming_behavior, update_state_from_velocity,
-    update_tree_growth, update_tree_spawning, update_winding_path, Position, TreeVariant,
+    spawn_snail, spawn_tree_spirit, sync_world_render_transform, update_animation_from_direction,
+    update_direction_from_velocity, update_guardian_animation_from_state, update_roaming_behavior,
+    update_state_from_velocity, update_tree_growth, update_tree_spawning, update_winding_path,
+    Direction, Position, TreeVariant, Velocity, WorldRenderDepth,
 };
 use map::MapPlugin;
-use tiles::constants::{LAYER_GROUND, TILE_DIRT, TILE_GRASS};
+use tiles::constants::{LAYER_GROUND, TILE_DIRT, TILE_GRASS, TILE_WORLD_SIZE};
 use world::{loader, WorldManager};
 
 // UI sprite vertical offsets for proper centering
@@ -31,6 +30,9 @@ const SNAIL_SPRITE_OFFSET_X: f32 = 10.0;
 const ZOOM_MIN: f32 = 0.5; // Max zoom in (smaller = more zoomed in)
 const ZOOM_MAX: f32 = 3.0; // Max zoom out (larger = more zoomed out)
 const ZOOM_SPEED: f32 = 0.1; // Zoom change per input
+
+// Camera movement configuration
+const BASE_PAN_SPEED: f32 = 200.0; // Base speed for panning when at minimum zoom
 
 // UI marker components
 #[derive(Component)]
@@ -113,6 +115,22 @@ impl PaintMode {
     }
 }
 
+#[derive(Resource, Default, Clone, Debug)]
+struct PaintDragState {
+    last_painted_tile: Option<IVec2>,
+}
+
+impl PaintDragState {
+    fn reset(&mut self) {
+        self.last_painted_tile = None;
+    }
+}
+
+#[derive(Resource, Default, Clone, Debug)]
+struct SpriteBoundsDebug {
+    enabled: bool,
+}
+
 // Save notification resource - tracks save notification display state
 #[derive(Resource)]
 struct SaveNotification {
@@ -152,12 +170,13 @@ struct SaveNotificationText;
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
-        .add_plugins(PanCameraPlugin)
         .add_plugins(MapPlugin)
         .init_resource::<WorldManager>()
         .init_resource::<loader::ChunkSaveTimer>()
         .init_resource::<PlacementMode>()
         .init_resource::<PaintMode>()
+        .init_resource::<PaintDragState>()
+        .init_resource::<SpriteBoundsDebug>()
         .init_resource::<SaveNotification>()
         // Register observer for ChunkDataChanged to sync visuals
         .add_observer(loader::sync_chunk_visuals_on_data_change)
@@ -171,17 +190,21 @@ fn main() {
                 // Entity state updates
                 apply_velocity,
                 update_state_from_velocity,
+                // Guardian animation switching (after state, before direction)
+                update_guardian_animation_from_state.after(update_state_from_velocity),
                 update_direction_from_velocity,
                 update_animation_from_direction,
-                sync_position_with_transform.after(apply_velocity),
+                sync_world_render_transform.after(apply_velocity),
                 // Entity interactions with world
-                snail_dirt_trail.after(sync_position_with_transform),
+                snail_dirt_trail.after(sync_world_render_transform),
                 // Tree spawning and growth
                 update_tree_spawning,
                 update_tree_growth,
+                // Entity interactions with world
                 // Animation
                 animate_sprite,
                 zoom_camera,
+                move_camera,
                 // loader::update_tilemap,
             ),
         )
@@ -196,12 +219,16 @@ fn main() {
                 // Save notification
                 handle_manual_save,
                 update_save_notification,
+                toggle_sprite_bounds_debug,
                 // World management
                 loader::update_camera_chunk,
                 loader::load_chunks_around_camera.after(loader::update_camera_chunk),
                 loader::unload_distant_chunks.after(loader::load_chunks_around_camera),
                 loader::apply_tile_modifications,
                 loader::autosave_dirty_chunks,
+                draw_snail_debug_bounds,
+                // Map reset
+                reset_world_map,
             ),
         )
         .run();
@@ -213,25 +240,7 @@ fn setup_world(
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
     // Spawn camera at origin
-    commands.spawn((
-        Camera2d,
-        Transform::from_xyz(0.0, 0.0, 999.0),
-        PanCamera {
-            min_zoom: 1.0,
-            max_zoom: 1.0,
-            zoom_factor: 1.0,
-            key_up: Some(KeyCode::ArrowUp),
-            key_down: Some(KeyCode::ArrowDown),
-            key_left: Some(KeyCode::ArrowLeft),
-            key_right: Some(KeyCode::ArrowRight),
-            key_zoom_in: None,
-            key_zoom_out: None,
-            key_rotate_ccw: None,
-            key_rotate_cw: None,
-            pan_speed: 200.0,
-            ..default()
-        },
-    ));
+    commands.spawn((Camera2d, Transform::from_xyz(0.0, 0.0, 999.0)));
 
     // Spawn player character at world origin
     spawn_player(
@@ -299,6 +308,45 @@ fn zoom_camera(
     }
 }
 
+/// Moves camera with arrow keys. Speed scales with zoom level.
+fn move_camera(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut camera_query: Query<(&mut Transform, &Projection), With<Camera2d>>,
+) {
+    let Ok((mut transform, projection)) = camera_query.single_mut() else {
+        return;
+    };
+
+    let zoom_scale = match projection {
+        Projection::Orthographic(ortho) => ortho.scale,
+        _ => 1.0,
+    };
+
+    // Scale speed relative to minimum zoom (most zoomed in = baseline speed)
+    let effective_speed = BASE_PAN_SPEED * (zoom_scale / ZOOM_MIN);
+    let mut direction = Vec2::ZERO;
+
+    if keyboard.pressed(KeyCode::ArrowUp) {
+        direction.y += 1.0;
+    }
+    if keyboard.pressed(KeyCode::ArrowDown) {
+        direction.y -= 1.0;
+    }
+    if keyboard.pressed(KeyCode::ArrowLeft) {
+        direction.x -= 1.0;
+    }
+    if keyboard.pressed(KeyCode::ArrowRight) {
+        direction.x += 1.0;
+    }
+
+    if direction != Vec2::ZERO {
+        direction = direction.normalize();
+        transform.translation.x += direction.x * effective_speed * time.delta_secs();
+        transform.translation.y += direction.y * effective_speed * time.delta_secs();
+    }
+}
+
 fn setup_ui(
     mut commands: Commands,
     assets: Res<AssetServer>,
@@ -306,17 +354,25 @@ fn setup_ui(
 ) {
     // Root UI container on the left side
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(0.0),
-            top: Val::Px(0.0),
-            bottom: Val::Px(0.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Start,
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(10.0),
-            ..default()
-        })
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(16.0),
+                top: Val::Px(16.0),
+                bottom: Val::Px(16.0),
+                width: Val::Px(82.0),
+                padding: UiRect::all(Val::Px(9.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(12.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Start,
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(10.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.08, 0.1, 0.12, 0.88)),
+            BorderColor::all(Color::srgba(0.72, 0.8, 0.76, 0.22)),
+        ))
         .with_children(|parent| {
             // Load textures for UI buttons
             let guardian_texture = assets.load("creatures/forest_guardians/oak_guardian_idle.png");
@@ -375,12 +431,12 @@ fn setup_ui(
 
             // Button 2 - With Forest Guardian sprite (with submenu row)
             parent
-                .spawn(Node {
+                .spawn((Node {
                     flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(10.0),
+                    column_gap: Val::Px(0.0),
                     align_items: AlignItems::Center,
                     ..default()
-                })
+                },))
                 .with_children(|row| {
                     // Main guardian button
                     row.spawn((
@@ -427,8 +483,6 @@ fn setup_ui(
                     });
 
                     // Submenu container (initially hidden)
-                    let guardian_layout_submenu =
-                        TextureAtlasLayout::from_grid(UVec2::splat(32), 8, 4, None, None);
                     let guardians = [
                         ("Oak", "oak_guardian_idle.png"),
                         ("Birch", "birch_guardian_idle.png"),
@@ -441,16 +495,22 @@ fn setup_ui(
                         GuardianSubmenu,
                         Node {
                             display: Display::None, // Hidden by default
+                            margin: UiRect::left(Val::Px(-9.0)),
+                            padding: UiRect::all(Val::Px(9.0)),
                             flex_direction: FlexDirection::Row,
                             column_gap: Val::Px(10.0),
+                            border_radius: BorderRadius::all(Val::Px(12.0)),
                             ..default()
                         },
+                        BackgroundColor(Color::srgba(0.08, 0.1, 0.12, 0.88)),
                     ))
                     .with_children(|submenu| {
                         for (name, filename) in guardians.iter() {
                             let texture =
                                 assets.load(format!("creatures/forest_guardians/{}", filename));
-                            let layout = texture_atlas_layouts.add(guardian_layout_submenu.clone());
+                            let layout = texture_atlas_layouts.add(
+                                TextureAtlasLayout::from_grid(UVec2::splat(32), 8, 4, None, None),
+                            );
                             let variant = name.to_lowercase();
 
                             submenu
@@ -542,12 +602,12 @@ fn setup_ui(
 
             // Button 4 - Terrain painting (with submenu row)
             parent
-                .spawn(Node {
+                .spawn((Node {
                     flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(10.0),
+                    column_gap: Val::Px(0.0),
                     align_items: AlignItems::Center,
                     ..default()
-                })
+                },))
                 .with_children(|row| {
                     // Load terrain tileset for UI (separate file - won't be reinterpreted as array texture)
                     // terrain_array_ui.png is 8x16 pixels = 2 tiles stacked vertically (8x8 each)
@@ -601,10 +661,14 @@ fn setup_ui(
                         TerrainSubmenu,
                         Node {
                             display: Display::None, // Hidden by default
+                            margin: UiRect::left(Val::Px(-9.0)),
+                            padding: UiRect::all(Val::Px(9.0)),
                             flex_direction: FlexDirection::Row,
                             column_gap: Val::Px(10.0),
+                            border_radius: BorderRadius::all(Val::Px(12.0)),
                             ..default()
                         },
+                        BackgroundColor(Color::srgba(0.08, 0.1, 0.12, 0.88)),
                     ))
                     .with_children(|submenu| {
                         // Grass button
@@ -1008,43 +1072,55 @@ fn handle_terrain_painting(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     ui_query: Query<&Interaction, With<Button>>,
+    mut paint_drag_state: ResMut<PaintDragState>,
     mut world_manager: ResMut<WorldManager>,
 ) {
-    // Only handle left clicks when a terrain type is selected
-    if !mouse_button.just_pressed(MouseButton::Left) {
+    if !mouse_button.pressed(MouseButton::Left) {
+        paint_drag_state.reset();
         return;
     }
 
     let Some(ref terrain_type) = paint_mode.selected else {
+        paint_drag_state.reset();
         return;
     };
 
     // Don't paint terrain if cursor is over any UI element
     for interaction in ui_query.iter() {
         if *interaction == Interaction::Pressed || *interaction == Interaction::Hovered {
+            paint_drag_state.reset();
             return;
         }
     }
 
     // Get the primary window
     let Ok(window) = windows.single() else {
+        paint_drag_state.reset();
         return;
     };
 
     // Get cursor position in window
     let Some(cursor_pos) = window.cursor_position() else {
+        paint_drag_state.reset();
         return;
     };
 
     // Get camera components
     let Ok((camera, camera_transform)) = camera_query.single() else {
+        paint_drag_state.reset();
         return;
     };
 
     // Convert cursor position to world position
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
+        paint_drag_state.reset();
         return;
     };
+
+    let tile_pos = world_to_tile_pos(world_pos);
+    if paint_drag_state.last_painted_tile == Some(tile_pos) {
+        return;
+    }
 
     // Determine which tile to paint based on terrain type
     let tile_id = match terrain_type {
@@ -1054,10 +1130,32 @@ fn handle_terrain_painting(
 
     // Queue the tile modification on the ground layer
     world_manager.queue_tile_modification(world_pos.x, world_pos.y, tile_id, LAYER_GROUND);
+    paint_drag_state.last_painted_tile = Some(tile_pos);
     info!(
         "Painted {:?} tile at ({}, {})",
         terrain_type, world_pos.x, world_pos.y
     );
+}
+
+fn world_to_tile_pos(world_pos: Vec2) -> IVec2 {
+    IVec2::new(
+        (world_pos.x / TILE_WORLD_SIZE).floor() as i32,
+        (world_pos.y / TILE_WORLD_SIZE).floor() as i32,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn world_to_tile_pos_handles_positive_and_negative_coordinates() {
+        assert_eq!(world_to_tile_pos(Vec2::new(0.0, 0.0)), IVec2::new(0, 0));
+        assert_eq!(world_to_tile_pos(Vec2::new(31.9, 31.9)), IVec2::new(0, 0));
+        assert_eq!(world_to_tile_pos(Vec2::new(32.0, 32.0)), IVec2::new(1, 1));
+        assert_eq!(world_to_tile_pos(Vec2::new(-0.1, -0.1)), IVec2::new(-1, -1));
+        assert_eq!(world_to_tile_pos(Vec2::new(-32.0, -32.0)), IVec2::new(-1, -1));
+    }
 }
 
 /// Setup UI for save notification in top right corner
@@ -1159,4 +1257,169 @@ fn update_save_notification(
             Visibility::Hidden
         };
     }
+}
+
+fn toggle_sprite_bounds_debug(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut sprite_bounds_debug: ResMut<SpriteBoundsDebug>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyB) {
+        sprite_bounds_debug.enabled = !sprite_bounds_debug.enabled;
+        info!(
+            "Sprite bounds debug {}",
+            if sprite_bounds_debug.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+}
+
+fn draw_snail_debug_bounds(
+    mut gizmos: Gizmos,
+    sprite_bounds_debug: Res<SpriteBoundsDebug>,
+    images: Res<Assets<Image>>,
+    texture_atlas_layouts: Res<Assets<TextureAtlasLayout>>,
+    sprite_query: Query<
+        (
+            &Sprite,
+            Option<&Anchor>,
+            &Transform,
+            Option<&Position>,
+            Option<&Velocity>,
+            Option<&Direction>,
+        ),
+        With<WorldRenderDepth>,
+    >,
+) {
+    if !sprite_bounds_debug.enabled {
+        return;
+    }
+
+    for (sprite, anchor, transform, position, velocity, direction) in sprite_query.iter() {
+        let Some(base_size) = sprite_debug_size(sprite, &images, &texture_atlas_layouts) else {
+            continue;
+        };
+
+        let world_size = base_size * transform.scale.truncate().abs();
+        let anchor = anchor.copied().unwrap_or_default();
+        let sprite_center = transform.translation.truncate() - anchor.as_vec() * world_size;
+
+        gizmos.rect_2d(
+            Isometry2d::from_translation(sprite_center),
+            world_size,
+            Color::srgb(1.0, 0.2, 0.2),
+        );
+
+        gizmos.circle_2d(transform.translation.truncate(), 4.0, Color::srgb(0.2, 1.0, 0.2));
+
+        if let Some(position) = position {
+            gizmos.circle_2d(
+                Vec2::new(position.x, position.y),
+                3.0,
+                Color::srgb(0.2, 0.6, 1.0),
+            );
+        }
+
+        if let (Some(velocity), Some(_direction)) = (velocity, direction) {
+            if velocity.magnitude() > 0.1 {
+                draw_direction_gizmo(
+                    &mut gizmos,
+                    transform.translation.truncate(),
+                    Vec2::new(velocity.x, velocity.y).normalize(),
+                );
+            }
+        }
+    }
+}
+
+fn draw_direction_gizmo(gizmos: &mut Gizmos, origin: Vec2, direction: Vec2) {
+    const DIRECTION_GIZMO_LENGTH: f32 = 18.0;
+    const DIRECTION_GIZMO_HEAD_LENGTH: f32 = 6.0;
+    const DIRECTION_GIZMO_HEAD_ANGLE: f32 = 0.45;
+
+    let tip = origin + direction * DIRECTION_GIZMO_LENGTH;
+    let head_back = direction * DIRECTION_GIZMO_HEAD_LENGTH;
+    let left_head = head_back.rotate(Vec2::from_angle(DIRECTION_GIZMO_HEAD_ANGLE));
+    let right_head = head_back.rotate(Vec2::from_angle(-DIRECTION_GIZMO_HEAD_ANGLE));
+    let color = Color::srgb(1.0, 0.85, 0.2);
+
+    gizmos.line_2d(origin, tip, color);
+    gizmos.line_2d(tip, tip - left_head, color);
+    gizmos.line_2d(tip, tip - right_head, color);
+}
+
+fn sprite_debug_size(
+    sprite: &Sprite,
+    images: &Assets<Image>,
+    texture_atlas_layouts: &Assets<TextureAtlasLayout>,
+) -> Option<Vec2> {
+    if let Some(custom_size) = sprite.custom_size {
+        return Some(custom_size);
+    }
+
+    if let Some(texture_atlas) = &sprite.texture_atlas {
+        if let Some(layout) = texture_atlas_layouts.get(&texture_atlas.layout) {
+            if let Some(rect) = layout.textures.get(texture_atlas.index) {
+                let size = rect.max - rect.min;
+                return Some(size.as_vec2());
+            }
+        }
+    }
+
+    if let Some(rect) = sprite.rect {
+        return Some(rect.size());
+    }
+
+    images.get(&sprite.image).map(|image| image.size().as_vec2())
+}
+
+/// System to reset the world map when 'R' key is pressed
+fn reset_world_map(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut world_manager: ResMut<WorldManager>,
+    mut camera_query: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
+    chunk_entities: Query<Entity, With<TilemapChunk>>,
+    mut commands: Commands,
+) {
+    // Only trigger on R key press
+    if !keyboard.just_pressed(KeyCode::KeyR) {
+        return;
+    }
+
+    info!("Resetting world map...");
+
+    // 1. Despawn all active chunk entities (all 3 layers)
+    for entity in chunk_entities.iter() {
+        commands.entity(entity).despawn();
+    }
+
+    // 2. Clear WorldManager state
+    world_manager.active_chunks.clear();
+    world_manager.dirty_chunks.clear();
+    world_manager.chunk_cache.clear();
+    world_manager.pending_tile_modifications.clear();
+    world_manager.camera_chunk = None;
+
+    // 3. Delete save directory from disk
+    let save_dir = &world_manager.save_directory;
+    if save_dir.exists() {
+        if let Err(e) = fs::remove_dir_all(save_dir) {
+            warn!("Failed to delete save directory: {}", e);
+        } else {
+            info!("Deleted save directory: {:?}", save_dir);
+        }
+    }
+
+    // 4. Reset camera to origin and zoom to default (1.0)
+    if let Ok((mut transform, mut projection)) = camera_query.single_mut() {
+        transform.translation.x = 0.0;
+        transform.translation.y = 0.0;
+        if let Projection::Orthographic(ref mut ortho) = projection.as_mut() {
+            ortho.scale = 1.0;
+        }
+    }
+
+    info!("World map reset complete");
 }

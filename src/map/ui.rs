@@ -1,5 +1,5 @@
+use super::{MapContent, MapModal};
 use bevy::prelude::*;
-use super::{MapModal, MapContent};
 
 /// Sets up the map modal UI (hidden by default)
 pub fn setup_map_ui(mut commands: Commands) {
@@ -17,7 +17,7 @@ pub fn setup_map_ui(mut commands: Commands) {
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)),
             Visibility::Hidden, // Hidden by default
-            ZIndex(1000), // Ensure it's on top
+            ZIndex(1000),       // Ensure it's on top
         ))
         .with_children(|parent| {
             // Map content container (almost full screen, slightly inset)

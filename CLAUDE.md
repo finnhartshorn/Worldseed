@@ -87,7 +87,7 @@ The codebase is organized into modules:
      - `update_state_from_velocity` - Auto-transitions between Idle/Moving states
      - `update_direction_from_velocity` - Updates facing direction from movement
      - `update_animation_from_direction` - Selects correct sprite sheet row for direction
-     - `sync_position_with_transform` - Syncs Position component to Transform for rendering
+     - `sync_world_render_transform` - Syncs Position to Transform and computes deterministic world depth
      - `animate_sprite` - Cycles through animation frames based on timers
      - `snail_dirt_trail` - Makes snails turn tiles into dirt with 20% chance as they move
      - `update_roaming_behavior` - Updates entities with RoamingBehavior component
@@ -140,26 +140,48 @@ The codebase is organized into modules:
    - `manager.rs` - WorldManager resource, tracks loaded chunks and statistics
    - `generator.rs` - Procedural terrain generation
    - `serialization.rs` - Chunk persistence to disk (v2 format supports multi-layer)
+
+   - **MVC-Style Architecture** - Clean separation between data (model) and rendering (view):
+     - **Data Layer (`ChunkData` in cache)**: Single source of truth for all tile data
+       - Persists in `WorldManager.chunk_cache` independent of rendering state
+       - Loads from disk or generates on-demand when accessed
+       - Unlimited cache - all accessed chunks stay in memory
+       - Entities can modify unrendered chunks (modifications always succeed)
+     - **View Layer (`TilemapChunk` entities)**: Ephemeral rendering artifacts
+       - Spawned/despawned based on camera position and zoom
+       - Always syncs from cached `ChunkData` when spawned
+       - Independent lifecycle from data layer
+       - Each chunk position has 3 layer entities (ground, decoration, overlay) at different Z-depths
+
    - **Multi-layer chunk management**:
      - Each chunk position tracks 3 layer entities (ground, decoration, overlay)
-     - Loader spawns all layers at appropriate Z-depths when loading chunks
-     - Unloader despawns all layer entities together when unloading chunks
+     - Loader ensures data is in cache, then spawns visual entities for all layers
+     - Unloader only despawns visual entities - data persists in cache
      - ChunkData stores separate tile arrays for each layer
+
    - **Zoom-aware loading**: Load/unload radii automatically adjust based on camera zoom level
-   - Load radius: Calculated from visible viewport + 2 chunk buffer (minimum 3 chunks)
-   - Unload radius: Load radius + 2 chunks (hysteresis buffer)
-   - **Hysteresis design**: +2 chunk buffer prevents thrashing
-   - Prevents repeated load/unload cycles when camera moves back and forth near chunk boundaries
-   - When zoomed out, more chunks load to cover larger visible area
-   - When zoomed in, fewer chunks load since less area is visible
-   - Chunks serialize when unloaded if dirty
-   - Base constants defined in `src/tiles/constants.rs` (used as minimums)
+     - Load radius: Calculated from visible viewport + 2 chunk buffer (minimum 3 chunks)
+     - Unload radius: Load radius + 2 chunks (hysteresis buffer)
+     - **Hysteresis design**: +2 chunk buffer prevents thrashing
+     - Prevents repeated load/unload cycles when camera moves back and forth near chunk boundaries
+     - When zoomed out, more chunks load to cover larger visible area
+     - When zoomed in, fewer chunks load since less area is visible
+     - Base constants defined in `src/tiles/constants.rs` (used as minimums)
+
    - **Tile Modification System**: Entities can modify world tiles dynamically on specific layers
      - `TileModification` - Queued tile change requests (world position + tile ID + layer)
      - `queue_tile_modification(x, y, tile_id, layer)` - Queue a layer-specific tile change
-     - `apply_tile_modifications` system - Applies queued changes to both cache and visual tilemap
-     - Changes target specific layers and are marked dirty for automatic serialization
-   - **Serialization format**:
+     - `apply_tile_modifications` system:
+       - Ensures chunk data is in cache (loads from disk/generates if needed)
+       - Updates `ChunkData` in cache (always succeeds, even for unrendered chunks)
+       - Updates visual `TilemapChunk` entities if they exist (optional sync)
+       - Marks chunks dirty for automatic persistence
+     - **Key guarantee**: Modifications never silently fail, work on any chunk regardless of render state
+
+   - **Persistence System**:
+     - Periodic autosave: `ChunkSaveTimer` triggers saves every 30 seconds (configurable)
+     - Save on unload: Dirty chunks save when visual entities are unloaded
+     - Deferred/batched writes: Dirty flags cleared after successful save
      - v2 format saves all 3 layers with layer count and checksum validation
      - Backward compatible: can load v1 (single-layer) files and convert to multi-layer
      - v1 chunks load with all tiles on ground layer, other layers empty
@@ -210,7 +232,7 @@ Update systems run in this order:
    - `update_state_from_velocity` - Update entity states (Idle/Moving)
    - `update_direction_from_velocity` - Update facing direction
    - `update_animation_from_direction` - Update sprite row for direction
-   - `sync_position_with_transform` - Sync Position to Transform (after velocity)
+   - `sync_world_render_transform` - Sync Position to Transform and update y-sorted depth (after velocity)
 4. **Entity-world interactions:**
    - `snail_dirt_trail` - Snails modify tiles as they move (after position sync)
 5. **Entity growth:**
@@ -227,11 +249,12 @@ Update systems run in this order:
 11. `load_chunks_around_camera` - Load chunks in radius (after camera update)
 12. `unload_distant_chunks` - Unload far chunks (after loading)
 13. `apply_tile_modifications` - Apply queued tile changes to cache and visuals (after terrain painting)
+14. `autosave_dirty_chunks` - Periodically save dirty chunks (every 30 seconds)
 
 **Critical orderings:**
 - AI behaviors run before velocity application to set movement intent
 - Entity state pipeline must run before animation to ensure correct sprite rows
-- `sync_position_with_transform` must run after `apply_velocity` to reflect position changes
+- `sync_world_render_transform` must run after `apply_velocity` to reflect position and depth changes
 - Entity-world interactions run after position sync to use updated positions
 - `apply_tile_modifications` runs after all tile changes are queued
 - Camera updates before chunk loading to ensure correct chunks are loaded
@@ -280,6 +303,7 @@ Update systems run in this order:
 
 **Key Design Principles:**
 - `Position` is separate from `Transform` - Position is for game logic, Transform is for rendering
+- World sprites use `WorldRenderDepth` for y-sorted depth; farther south renders in front within the same stratum
 - Entities automatically transition states based on velocity (via `update_state_from_velocity`)
 - Direction automatically updates from velocity and controls sprite sheet row selection
 - Animation system is direction-aware and handles all sprite types generically
@@ -320,7 +344,8 @@ assets/
   - Ground layer: 0.0
   - Decoration layer: 0.1
   - Overlay layer: 0.2
-  - Entity sprites: 1.0+
+  - World sprites: `WorldRenderDepth` base strata plus y-sorting (`z = base - y * 0.001 + bias`)
+  - Same-footpoint ties are resolved with small deterministic biases, not spawn order
 
 **Camera Controls** (for testing and navigation):
 - **Movement**: WASD or Arrow Keys (200 pixels/second)

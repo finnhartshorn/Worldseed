@@ -24,9 +24,9 @@ pub const CHUNK_PIXEL_SIZE: f32 = TILE_WORLD_SIZE * CHUNK_SIZE as f32; // 1024 w
 pub const NUM_LAYERS: usize = 3;
 
 /// Layer indices
-pub const LAYER_GROUND: usize = 0;      // Base terrain layer
-pub const LAYER_DECORATION: usize = 1;  // Decorative tiles (flowers, rocks, etc.)
-pub const LAYER_OVERLAY: usize = 2;     // Top layer (effects, particles, etc.)
+pub const LAYER_GROUND: usize = 0; // Base terrain layer
+pub const LAYER_DECORATION: usize = 1; // Decorative tiles (flowers, rocks, etc.)
+pub const LAYER_OVERLAY: usize = 2; // Top layer (effects, particles, etc.)
 
 /// Z-positions for each layer in world space
 pub const LAYER_Z_GROUND: f32 = 0.0;

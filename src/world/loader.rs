@@ -1,7 +1,6 @@
 use super::{generator, manager::WorldManager, serialization};
 use crate::tiles::{
-    chunk::coords, Chunk, ChunkData, ChunkPos, DirtyChunk, CHUNK_LOAD_RADIUS,
-    TILE_DISPLAY_SIZE,
+    chunk::coords, Chunk, ChunkData, ChunkPos, DirtyChunk, CHUNK_LOAD_RADIUS, TILE_DISPLAY_SIZE,
 };
 use bevy::prelude::*;
 use bevy::sprite_render::{TileData, TilemapChunk, TilemapChunkTileData};
@@ -299,18 +298,13 @@ pub fn log_world_stats(world: Res<WorldManager>) {
 }
 
 /// System to apply pending tile modifications to cache and trigger observers for visual updates
-pub fn apply_tile_modifications(
-    mut world: ResMut<WorldManager>,
-    mut commands: Commands,
-) {
+pub fn apply_tile_modifications(mut world: ResMut<WorldManager>, mut commands: Commands) {
     use crate::tiles::chunk::coords;
 
     let modifications = world.take_tile_modifications();
     if modifications.is_empty() {
         return;
     }
-
-    info!("Processing {} modifications", modifications.len());
 
     for modification in modifications {
         // Convert world position to chunk position
@@ -341,7 +335,6 @@ pub fn apply_tile_modifications(
             world.mark_dirty(chunk_pos);
 
             // Trigger observer for visual update (observer will handle syncing to render layer)
-            info!("🚀 TRIGGERING EVENT: chunk_pos={:?}, layer={}", chunk_pos, modification.layer);
             commands.trigger(super::manager::ChunkDataChanged {
                 chunk_pos,
                 layer: modification.layer,
@@ -369,9 +362,6 @@ pub fn sync_chunk_visuals_on_data_change(
     let chunk_pos = event.chunk_pos;
     let layer = event.layer;
 
-    // DEBUG: Log when observer is called
-    info!("🔔 OBSERVER CALLED: chunk_pos={:?}, layer={}", chunk_pos, layer);
-
     // Get the chunk data from cache
     let Some(chunk_data) = world.get_cached_chunk(&chunk_pos) else {
         warn!(
@@ -381,16 +371,9 @@ pub fn sync_chunk_visuals_on_data_change(
         return;
     };
 
-    // DEBUG: Count how many chunk entities we're querying
-    let total_chunks = chunk_query.iter().count();
-    info!("🔍 Observer query found {} total chunk entities", total_chunks);
-
     // Find the visual entity for this chunk and layer
-    let mut found = false;
     for (chunk, mut tile_data) in chunk_query.iter_mut() {
         if chunk.position == chunk_pos && chunk.layer == layer {
-            found = true;
-            info!("✅ FOUND matching chunk entity: pos={:?}, layer={}", chunk.position, chunk.layer);
             // Sync the entire layer from ChunkData to visual TilemapChunkTileData
             for y in 0..CHUNK_SIZE {
                 for x in 0..CHUNK_SIZE {
@@ -412,13 +395,6 @@ pub fn sync_chunk_visuals_on_data_change(
             );
             break;
         }
-    }
-
-    // DEBUG: Log if we didn't find a matching chunk entity
-    if !found {
-        warn!("❌ Observer did NOT find matching chunk entity for pos={:?}, layer={}", chunk_pos, layer);
-    } else {
-        info!("✅ Observer successfully synced visuals for chunk {:?}, layer {}", chunk_pos, layer);
     }
 
     // If no visual entity exists, that's ok - chunk might not be rendered yet

@@ -47,10 +47,10 @@ impl Velocity {
 /// Direction the entity is facing (for animation purposes)
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    NorthEast = 0, // Row 0 in sprite sheets (up-right)
-    NorthWest = 1, // Row 1 in sprite sheets (up-left)
-    SouthEast = 2, // Row 2 in sprite sheets (down-right)
-    SouthWest = 3, // Row 3 in sprite sheets (down-left)
+    SouthEast = 0, // Row 0 in sprite sheets (down-right)
+    SouthWest = 1, // Row 1 in sprite sheets (down-left)
+    NorthEast = 2, // Row 2 in sprite sheets (up-right)
+    NorthWest = 3, // Row 3 in sprite sheets (up-left)
 }
 
 impl Direction {
@@ -150,6 +150,18 @@ impl ForestGuardian {
     }
 }
 
+/// Stores animation data for forest guardians to switch between idle and walk animations
+#[derive(Component)]
+pub struct GuardianAnimations {
+    pub idle_texture: Handle<Image>,
+    pub idle_layout: Handle<TextureAtlasLayout>,
+    pub walk_texture: Handle<Image>,
+    pub walk_layout: Handle<TextureAtlasLayout>,
+    pub idle_frames: usize,
+    pub walk_frames: usize,
+    pub current_state: EntityState,
+}
+
 /// Component for entities that periodically spawn trees
 #[derive(Component, Debug, Clone, Copy)]
 pub struct TreeSpawner {
@@ -167,7 +179,12 @@ pub struct TreeSpawner {
 
 impl TreeSpawner {
     /// Create a new tree spawner with default settings
-    pub fn new(min_interval: f32, max_interval: f32, spawn_radius: f32, tree_growth_time: f32) -> Self {
+    pub fn new(
+        min_interval: f32,
+        max_interval: f32,
+        spawn_radius: f32,
+        tree_growth_time: f32,
+    ) -> Self {
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hash, Hasher};
 
@@ -197,6 +214,73 @@ impl TreeSpawner {
 #[derive(Component)]
 pub struct Snail;
 
+/// Marker component for RTS Humans tree props
+#[derive(Component)]
+pub struct RtsTree;
+
+/// Marker component for variant trees from Crafting And Professions pack
+#[derive(Component)]
+pub struct VariantTree;
+
+/// High-level depth band for world sprites.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderStratum {
+    Ground,
+    Decoration,
+    WorldObject,
+    Overlay,
+}
+
+impl RenderStratum {
+    pub const fn base_z(self) -> f32 {
+        match self {
+            RenderStratum::Ground => 0.0,
+            RenderStratum::Decoration => 10.0,
+            RenderStratum::WorldObject => 20.0,
+            RenderStratum::Overlay => 30.0,
+        }
+    }
+}
+
+/// Depth metadata for world sprites that should sort by their world position.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WorldRenderDepth {
+    pub stratum: RenderStratum,
+    pub depth_bias: f32,
+}
+
+impl WorldRenderDepth {
+    // Keep strata far enough apart that world-space y-sorting cannot push sprites into tile layers.
+    pub const Y_SORT_SCALE: f32 = 0.00001;
+
+    pub const fn new(stratum: RenderStratum) -> Self {
+        Self {
+            stratum,
+            depth_bias: 0.0,
+        }
+    }
+
+    pub const fn with_bias(stratum: RenderStratum, depth_bias: f32) -> Self {
+        Self {
+            stratum,
+            depth_bias,
+        }
+    }
+
+    pub fn z_for_position(&self, position: &Position) -> f32 {
+        self.stratum.base_z() - (position.y * Self::Y_SORT_SCALE) + self.depth_bias
+    }
+}
+
+/// RTS tree variants (first two trees from Tileset_And_Props.png)
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtsTreeVariant {
+    /// Larger tree (x=21–42, y=18–43 in source)
+    Large,
+    /// Smaller tree (x=53–67, y=20–40 in source)
+    Small,
+}
+
 /// Marker component for growing tree spirits
 #[derive(Component)]
 pub struct TreeSpirit;
@@ -204,10 +288,10 @@ pub struct TreeSpirit;
 /// Growth stages for trees
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrowthStage {
-    Seed,           // Initial planted seed (small sprite)
-    Sapling,        // Young sapling (medium sprite)
-    YoungTree,      // Growing tree (scaled up from sapling)
-    MatureTree,     // Fully grown tree (full size)
+    Seed,       // Initial planted seed (small sprite)
+    Sapling,    // Young sapling (medium sprite)
+    YoungTree,  // Growing tree (scaled up from sapling)
+    MatureTree, // Fully grown tree (full size)
 }
 
 impl GrowthStage {
@@ -243,6 +327,11 @@ pub struct GrowingTree {
     pub time_to_next_stage: f32,
     /// Tree variant (oak, birch, hickory, pine, willow)
     pub variant: TreeVariant,
+    /// Multiplier applied on top of GrowthStage::scale().
+    /// Tree spirits use 1.0 (atlas frames are pre-scaled 32×32 px).
+    /// RTS trees use 2.0 so MatureTree (2.0 × 2.0 = 4.0) matches
+    /// the 4× pixel-art display scale used for all other game entities.
+    pub base_scale: f32,
 }
 
 impl GrowingTree {
@@ -250,8 +339,9 @@ impl GrowingTree {
         Self {
             stage: GrowthStage::Seed,
             time_in_stage: 0.0,
-            time_to_next_stage: 5.0, // 5 seconds per stage by default
+            time_to_next_stage: 5.0,
             variant,
+            base_scale: 1.0,
         }
     }
 
@@ -261,11 +351,27 @@ impl GrowingTree {
             time_in_stage: 0.0,
             time_to_next_stage: growth_time,
             variant,
+            base_scale: 1.0,
+        }
+    }
+
+    pub fn with_base_scale(variant: TreeVariant, growth_time: f32, base_scale: f32) -> Self {
+        Self {
+            stage: GrowthStage::Seed,
+            time_in_stage: 0.0,
+            time_to_next_stage: growth_time,
+            variant,
+            base_scale,
         }
     }
 
     pub fn is_mature(&self) -> bool {
         self.stage == GrowthStage::MatureTree
+    }
+
+    /// The current display scale (base_scale × stage scale factor).
+    pub fn current_scale(&self) -> f32 {
+        self.base_scale * self.stage.scale()
     }
 }
 
@@ -423,8 +529,8 @@ pub struct WindingPath {
 impl WindingPath {
     /// Create a new winding path behavior with default settings
     pub fn new(speed: f32) -> Self {
-        use std::f32::consts::PI;
         use std::collections::hash_map::RandomState;
+        use std::f32::consts::PI;
         use std::hash::{BuildHasher, Hash, Hasher};
 
         // Simple pseudo-random number generation using current time and hash
@@ -455,8 +561,8 @@ impl WindingPath {
         turn_rate: f32,
         max_angle_change: f32,
     ) -> Self {
-        use std::f32::consts::PI;
         use std::collections::hash_map::RandomState;
+        use std::f32::consts::PI;
         use std::hash::{BuildHasher, Hash, Hasher};
 
         let hasher_builder = RandomState::new();

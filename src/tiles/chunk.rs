@@ -70,7 +70,13 @@ impl ChunkData {
     }
 
     /// Set tile at local chunk coordinates (0-31, 0-31) for a specific layer
-    pub fn set_tile(&mut self, layer: usize, local_x: usize, local_y: usize, tile_id: TileId) -> bool {
+    pub fn set_tile(
+        &mut self,
+        layer: usize,
+        local_x: usize,
+        local_y: usize,
+        tile_id: TileId,
+    ) -> bool {
         if layer >= NUM_LAYERS || local_x >= CHUNK_SIZE || local_y >= CHUNK_SIZE {
             return false;
         }
@@ -130,10 +136,7 @@ impl ChunkData {
 
     /// Create ChunkData from Bevy's TilemapChunkTileData (legacy - sets ground layer only)
     #[deprecated(note = "Use from_tilemap_data_single_layer instead to specify which layer")]
-    pub fn from_tilemap_data(
-        position: ChunkPos,
-        tile_data: &[Option<TileData>],
-    ) -> Option<Self> {
+    pub fn from_tilemap_data(position: ChunkPos, tile_data: &[Option<TileData>]) -> Option<Self> {
         Self::from_tilemap_data_single_layer(position, LAYER_GROUND, tile_data)
     }
 }

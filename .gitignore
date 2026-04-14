@@ -3,3 +3,4 @@
 /tmp
 # We need to ignore assets as we can only redistribute them in a game, uploading to github would breach our license
 /assets
+/saves

@@ -61,7 +61,10 @@ impl WorldManager {
     }
 
     /// Get the entities for a loaded chunk (all layers)
-    pub fn get_chunk_entities(&self, pos: &ChunkPos) -> Option<&[Entity; crate::tiles::NUM_LAYERS]> {
+    pub fn get_chunk_entities(
+        &self,
+        pos: &ChunkPos,
+    ) -> Option<&[Entity; crate::tiles::NUM_LAYERS]> {
         self.active_chunks.get(pos)
     }
 
@@ -76,7 +79,10 @@ impl WorldManager {
     }
 
     /// Unregister a chunk entity (when despawning)
-    pub fn unregister_chunk(&mut self, pos: &ChunkPos) -> Option<[Entity; crate::tiles::NUM_LAYERS]> {
+    pub fn unregister_chunk(
+        &mut self,
+        pos: &ChunkPos,
+    ) -> Option<[Entity; crate::tiles::NUM_LAYERS]> {
         self.active_chunks.remove(pos)
     }
 
@@ -129,7 +135,13 @@ impl WorldManager {
 
     /// Queue a tile modification at a world position (in pixels)
     /// The modification will be applied by the apply_tile_modifications system
-    pub fn queue_tile_modification(&mut self, world_x: f32, world_y: f32, tile_id: u16, layer: usize) {
+    pub fn queue_tile_modification(
+        &mut self,
+        world_x: f32,
+        world_y: f32,
+        tile_id: u16,
+        layer: usize,
+    ) {
         self.pending_tile_modifications.push(TileModification {
             world_x,
             world_y,

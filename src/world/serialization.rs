@@ -40,10 +40,7 @@ impl std::fmt::Display for SerializationError {
 impl std::error::Error for SerializationError {}
 
 /// Save a chunk to disk in binary format (v2 - supports multiple layers)
-pub fn save_chunk<P: AsRef<Path>>(
-    chunk: &ChunkData,
-    path: P,
-) -> Result<(), SerializationError> {
+pub fn save_chunk<P: AsRef<Path>>(chunk: &ChunkData, path: P) -> Result<(), SerializationError> {
     // Ensure directory exists
     if let Some(parent) = path.as_ref().parent() {
         fs::create_dir_all(parent)?;
