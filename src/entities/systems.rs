@@ -1,14 +1,21 @@
 use super::spawning::{
-    spawn_tree_spirit, spawn_variant_tree, update_animation_for_direction, AnimationTimer,
+    spawn_tree_spirit, spawn_variant_tree, update_animation_for_direction,
+    variant_tree_growth_texture_atlas_layout, variant_tree_shared_variation_texture_atlas_layout,
+    AnimationTimer,
 };
 use super::{
-    AnimationIndices, Direction, EntityState, ForestGuardian, GuardianAnimations, GrowingTree,
-    Position, RoamingBehavior, Snail, TreeSpawner, TreeVariant, Velocity, WindingPath,
-    WorldRenderDepth,
+    AnimationIndices, Direction, EntityState, ForestGuardian, GrowingTree, GrowthStage,
+    GuardianAnimations, Position, RoamingBehavior, Snail, TreeSpawner, TreeVariant, VariantTree,
+    Velocity, WindingPath, WorldRenderDepth,
 };
 use crate::tiles::TILE_DIRT;
 use crate::world::WorldManager;
 use bevy::prelude::*;
+
+const GUARDIAN_MIN_TREE_SPACING: f32 = 24.0;
+const GUARDIAN_LOCAL_DENSITY_RADIUS: f32 = 40.0;
+const GUARDIAN_LOCAL_TREE_CAP: usize = 3;
+const GUARDIAN_SPAWN_ATTEMPTS: u64 = 4;
 
 /// Syncs world positions into sprite transforms and assigns deterministic depth.
 pub fn sync_world_render_transform(
@@ -35,11 +42,19 @@ pub fn apply_velocity(time: Res<Time>, mut query: Query<(&mut Position, &Velocit
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        candidate_spawn_position, find_spawn_location, is_spawn_location_valid, mix_seed,
+        update_guardian_animation_from_state, update_tree_growth, validate_spawn_location,
+        GUARDIAN_LOCAL_DENSITY_RADIUS, GUARDIAN_MIN_TREE_SPACING, GUARDIAN_SPAWN_ATTEMPTS,
+    };
     use crate::entities::{
-        update_guardian_animation_from_state, AnimationIndices, Direction, EntityState,
-        GuardianAnimations, Position, RenderStratum, WorldRenderDepth,
+        spawning::{FOREST_GUARDIAN_DEPTH_BIAS, VARIANT_TREE_DEPTH_BIAS},
+        AnimationIndices, Direction, EntityState, GrowingTree, GrowthStage, GuardianAnimations,
+        Position, RenderStratum, RtsTree, TreeVariant, VariantTree, VariantTreeAppearance,
+        WorldRenderDepth,
     };
     use bevy::prelude::*;
+    use std::time::Duration;
 
     #[test]
     fn southern_positions_render_in_front() {
@@ -71,6 +86,32 @@ mod tests {
     }
 
     #[test]
+    fn configured_world_object_biases_stay_below_one_y_sort_step() {
+        let bias_gap = (FOREST_GUARDIAN_DEPTH_BIAS - VARIANT_TREE_DEPTH_BIAS).abs();
+
+        assert!(bias_gap < WorldRenderDepth::Y_SORT_SCALE);
+    }
+
+    #[test]
+    fn guardian_bias_only_wins_when_y_positions_are_nearly_identical() {
+        let guardian_y = 0.0;
+        let tree_y = -1.0;
+        let guardian_depth =
+            WorldRenderDepth::with_bias(RenderStratum::WorldObject, FOREST_GUARDIAN_DEPTH_BIAS);
+        let tree_depth =
+            WorldRenderDepth::with_bias(RenderStratum::WorldObject, VARIANT_TREE_DEPTH_BIAS);
+
+        assert!(
+            guardian_depth.z_for_position(&Position::new(0.0, guardian_y))
+                > tree_depth.z_for_position(&Position::new(0.0, guardian_y))
+        );
+        assert!(
+            tree_depth.z_for_position(&Position::new(0.0, tree_y))
+                > guardian_depth.z_for_position(&Position::new(0.0, guardian_y))
+        );
+    }
+
+    #[test]
     fn large_world_positions_stay_within_world_object_stratum() {
         let far_north = Position::new(0.0, 100_000.0);
         let far_south = Position::new(0.0, -100_000.0);
@@ -94,27 +135,30 @@ mod tests {
         let idle_texture = Handle::<Image>::default();
         let walk_texture = Handle::<Image>::default();
 
-        let entity = app.world_mut().spawn((
-            EntityState::Moving,
-            Direction::NorthWest,
-            GuardianAnimations {
-                idle_texture: idle_texture.clone(),
-                idle_layout: idle_layout.clone(),
-                walk_texture: walk_texture.clone(),
-                walk_layout: walk_layout.clone(),
-                idle_frames: 8,
-                walk_frames: 6,
-                current_state: EntityState::Idle,
-            },
-            Sprite::from_atlas_image(
-                idle_texture,
-                TextureAtlas {
-                    layout: idle_layout,
-                    index: 27,
+        let entity = app
+            .world_mut()
+            .spawn((
+                EntityState::Moving,
+                Direction::NorthWest,
+                GuardianAnimations {
+                    idle_texture: idle_texture.clone(),
+                    idle_layout: idle_layout.clone(),
+                    walk_texture: walk_texture.clone(),
+                    walk_layout: walk_layout.clone(),
+                    idle_frames: 8,
+                    walk_frames: 6,
+                    current_state: EntityState::Idle,
                 },
-            ),
-            AnimationIndices::new(24, 31),
-        )).id();
+                Sprite::from_atlas_image(
+                    idle_texture,
+                    TextureAtlas {
+                        layout: idle_layout,
+                        index: 27,
+                    },
+                ),
+                AnimationIndices::new(24, 31),
+            ))
+            .id();
 
         app.update();
 
@@ -128,10 +172,16 @@ mod tests {
         assert_eq!(animations.current_state, EntityState::Moving);
         assert_eq!(sprite.image, walk_texture);
         assert_eq!(
-            sprite.texture_atlas.as_ref().map(|atlas| atlas.layout.clone()),
+            sprite
+                .texture_atlas
+                .as_ref()
+                .map(|atlas| atlas.layout.clone()),
             Some(walk_layout)
         );
-        assert_eq!(sprite.texture_atlas.as_ref().map(|atlas| atlas.index), Some(18));
+        assert_eq!(
+            sprite.texture_atlas.as_ref().map(|atlas| atlas.index),
+            Some(18)
+        );
         assert_eq!(indices.first, 18);
         assert_eq!(indices.last, 23);
     }
@@ -146,27 +196,30 @@ mod tests {
         let idle_texture = Handle::<Image>::default();
         let walk_texture = Handle::<Image>::default();
 
-        let entity = app.world_mut().spawn((
-            EntityState::Idle,
-            Direction::SouthWest,
-            GuardianAnimations {
-                idle_texture: idle_texture.clone(),
-                idle_layout: idle_layout.clone(),
-                walk_texture: walk_texture.clone(),
-                walk_layout: walk_layout.clone(),
-                idle_frames: 8,
-                walk_frames: 6,
-                current_state: EntityState::Moving,
-            },
-            Sprite::from_atlas_image(
-                walk_texture,
-                TextureAtlas {
-                    layout: walk_layout,
-                    index: 11,
+        let entity = app
+            .world_mut()
+            .spawn((
+                EntityState::Idle,
+                Direction::SouthWest,
+                GuardianAnimations {
+                    idle_texture: idle_texture.clone(),
+                    idle_layout: idle_layout.clone(),
+                    walk_texture: walk_texture.clone(),
+                    walk_layout: walk_layout.clone(),
+                    idle_frames: 8,
+                    walk_frames: 6,
+                    current_state: EntityState::Moving,
                 },
-            ),
-            AnimationIndices::new(6, 11),
-        )).id();
+                Sprite::from_atlas_image(
+                    walk_texture,
+                    TextureAtlas {
+                        layout: walk_layout,
+                        index: 11,
+                    },
+                ),
+                AnimationIndices::new(6, 11),
+            ))
+            .id();
 
         app.update();
 
@@ -180,12 +233,307 @@ mod tests {
         assert_eq!(animations.current_state, EntityState::Idle);
         assert_eq!(sprite.image, idle_texture);
         assert_eq!(
-            sprite.texture_atlas.as_ref().map(|atlas| atlas.layout.clone()),
+            sprite
+                .texture_atlas
+                .as_ref()
+                .map(|atlas| atlas.layout.clone()),
             Some(idle_layout)
         );
-        assert_eq!(sprite.texture_atlas.as_ref().map(|atlas| atlas.index), Some(8));
+        assert_eq!(
+            sprite.texture_atlas.as_ref().map(|atlas| atlas.index),
+            Some(8)
+        );
         assert_eq!(indices.first, 8);
         assert_eq!(indices.last, 15);
+    }
+
+    #[test]
+    fn spawn_location_rejects_trees_inside_minimum_spacing() {
+        let candidate = Position::new(0.0, 0.0);
+        let tree_positions = [Position::new(GUARDIAN_MIN_TREE_SPACING - 1.0, 0.0)];
+
+        let validation = validate_spawn_location(&candidate, &tree_positions);
+
+        assert!(!is_spawn_location_valid(validation));
+    }
+
+    #[test]
+    fn spawn_location_accepts_when_nearest_tree_is_outside_spacing_limit() {
+        let candidate = Position::new(0.0, 0.0);
+        let tree_positions = [Position::new(GUARDIAN_MIN_TREE_SPACING + 1.0, 0.0)];
+
+        let validation = validate_spawn_location(&candidate, &tree_positions);
+
+        assert!(is_spawn_location_valid(validation));
+    }
+
+    #[test]
+    fn spawn_location_rejects_when_local_density_cap_is_reached() {
+        let candidate = Position::new(0.0, 0.0);
+        let edge = GUARDIAN_LOCAL_DENSITY_RADIUS - 1.0;
+        let tree_positions = [
+            Position::new(edge, 0.0),
+            Position::new(-edge, 0.0),
+            Position::new(0.0, edge),
+        ];
+
+        let validation = validate_spawn_location(&candidate, &tree_positions);
+
+        assert_eq!(validation.nearby_tree_count, 3);
+        assert!(!is_spawn_location_valid(validation));
+    }
+
+    #[test]
+    fn spawn_location_ignores_trees_outside_density_radius() {
+        let candidate = Position::new(0.0, 0.0);
+        let tree_positions = [Position::new(GUARDIAN_LOCAL_DENSITY_RADIUS + 1.0, 0.0)];
+
+        let validation = validate_spawn_location(&candidate, &tree_positions);
+
+        assert_eq!(validation.nearby_tree_count, 0);
+        assert!(is_spawn_location_valid(validation));
+    }
+
+    #[test]
+    fn find_spawn_location_retries_until_it_finds_open_space() {
+        let origin = Position::new(0.0, 0.0);
+        let spawn_radius = 80.0;
+        let seed = 0xDEAD_BEEF_CAFE_BABE;
+        let candidates: Vec<_> = (0..GUARDIAN_SPAWN_ATTEMPTS)
+            .map(|attempt| {
+                candidate_spawn_position(
+                    &origin,
+                    spawn_radius,
+                    mix_seed(seed ^ attempt.wrapping_mul(0xA24B_AED4_963E_E407)),
+                    mix_seed(
+                        seed ^ attempt.wrapping_mul(0x9FB2_1C65_1E98_DF25) ^ 0xD1B5_4A32_D192_ED03,
+                    ),
+                )
+            })
+            .collect();
+
+        let (expected_index, blockers) = (1..candidates.len())
+            .find_map(|index| {
+                let blockers = candidates[..index].to_vec();
+                let validation = validate_spawn_location(&candidates[index], &blockers);
+                is_spawn_location_valid(validation).then_some((index, blockers))
+            })
+            .expect("expected at least one retry candidate to remain valid");
+
+        let spawn_location = find_spawn_location(&origin, spawn_radius, &blockers, seed)
+            .expect("retry should find space");
+
+        assert!(spawn_location.distance_to(&candidates[0]) >= GUARDIAN_MIN_TREE_SPACING);
+        assert!(spawn_location.distance_to(&candidates[expected_index]) < 0.01);
+    }
+
+    #[test]
+    fn find_spawn_location_returns_none_when_all_attempts_are_crowded() {
+        let origin = Position::new(0.0, 0.0);
+        let spawn_radius = 80.0;
+        let seed = 0x1234_5678_9ABC_DEF0;
+        let tree_positions: Vec<_> = (0..GUARDIAN_SPAWN_ATTEMPTS)
+            .map(|attempt| {
+                candidate_spawn_position(
+                    &origin,
+                    spawn_radius,
+                    mix_seed(seed ^ attempt.wrapping_mul(0xA24B_AED4_963E_E407)),
+                    mix_seed(
+                        seed ^ attempt.wrapping_mul(0x9FB2_1C65_1E98_DF25) ^ 0xD1B5_4A32_D192_ED03,
+                    ),
+                )
+            })
+            .collect();
+
+        let spawn_location = find_spawn_location(&origin, spawn_radius, &tree_positions, seed);
+
+        assert!(spawn_location.is_none());
+    }
+
+    #[test]
+    fn variant_tree_growth_advances_atlas_frame_without_rescaling() {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default());
+        app.add_systems(Update, update_tree_growth);
+
+        let atlas_layout = Handle::<TextureAtlasLayout>::default();
+        let entity = app
+            .world_mut()
+            .spawn((
+                VariantTree,
+                GrowingTree::with_variant_appearance(
+                    TreeVariant::Oak,
+                    1.0,
+                    4.0,
+                    VariantTreeAppearance::Original,
+                ),
+                Sprite::from_atlas_image(
+                    Handle::<Image>::default(),
+                    TextureAtlas {
+                        layout: atlas_layout,
+                        index: 0,
+                    },
+                ),
+                Transform::from_scale(Vec3::splat(4.0)),
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_secs_f32(1.0));
+        app.update();
+
+        let mut query = app
+            .world_mut()
+            .query::<(&GrowingTree, &Sprite, &Transform)>();
+        let (growing_tree, sprite, transform) = query
+            .get(app.world(), entity)
+            .expect("variant tree components should exist");
+
+        assert_eq!(growing_tree.stage, GrowthStage::Sapling);
+        assert_eq!(
+            sprite.texture_atlas.as_ref().map(|atlas| atlas.index),
+            Some(1)
+        );
+        assert_eq!(transform.scale, Vec3::splat(4.0));
+    }
+
+    #[test]
+    fn new_variant_tree_growth_uses_mature_sprite_at_three_quarter_scale() {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default());
+        app.add_systems(Update, update_tree_growth);
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                VariantTree,
+                GrowingTree::with_variant_appearance(
+                    TreeVariant::Willow,
+                    1.0,
+                    4.0,
+                    VariantTreeAppearance::Variation2,
+                ),
+                Sprite::from_atlas_image(
+                    Handle::<Image>::default(),
+                    TextureAtlas {
+                        layout: Handle::<TextureAtlasLayout>::default(),
+                        index: 1,
+                    },
+                ),
+                Transform::from_scale(Vec3::splat(4.0)),
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_secs_f32(1.0));
+        app.update();
+
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_secs_f32(1.0));
+        app.update();
+
+        let mut query = app
+            .world_mut()
+            .query::<(&GrowingTree, &Sprite, &Transform)>();
+        let (growing_tree, sprite, transform) = query
+            .get(app.world(), entity)
+            .expect("variant tree components should exist");
+
+        assert_eq!(growing_tree.stage, GrowthStage::YoungTree);
+        assert_eq!(
+            sprite.texture_atlas.as_ref().map(|atlas| atlas.index),
+            Some(10)
+        );
+        assert_eq!(transform.scale, Vec3::splat(3.0));
+    }
+
+    #[test]
+    fn new_variant_tree_growth_restores_full_scale_when_mature() {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default());
+        app.add_systems(Update, update_tree_growth);
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                VariantTree,
+                GrowingTree::with_variant_appearance(
+                    TreeVariant::Birch,
+                    1.0,
+                    4.0,
+                    VariantTreeAppearance::Variation3,
+                ),
+                Sprite::from_atlas_image(
+                    Handle::<Image>::default(),
+                    TextureAtlas {
+                        layout: Handle::<TextureAtlasLayout>::default(),
+                        index: 0,
+                    },
+                ),
+                Transform::from_scale(Vec3::splat(4.0)),
+            ))
+            .id();
+
+        for _ in 0..3 {
+            app.world_mut()
+                .resource_mut::<Time<()>>()
+                .advance_by(Duration::from_secs_f32(1.0));
+            app.update();
+        }
+
+        let mut query = app
+            .world_mut()
+            .query::<(&GrowingTree, &Sprite, &Transform)>();
+        let (growing_tree, sprite, transform) = query
+            .get(app.world(), entity)
+            .expect("variant tree components should exist");
+
+        assert_eq!(growing_tree.stage, GrowthStage::MatureTree);
+        assert_eq!(
+            sprite.texture_atlas.as_ref().map(|atlas| atlas.index),
+            Some(15)
+        );
+        assert_eq!(transform.scale, Vec3::splat(4.0));
+    }
+
+    #[test]
+    fn pine_variant_never_uses_extra_appearance() {
+        assert_eq!(
+            TreeVariant::Pine.choose_appearance(0.99),
+            VariantTreeAppearance::Original
+        );
+    }
+
+    #[test]
+    fn non_variant_tree_growth_keeps_scale_based_progression() {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default());
+        app.add_systems(Update, update_tree_growth);
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                RtsTree,
+                GrowingTree::with_base_scale(TreeVariant::Oak, 1.0, 2.0),
+                Transform::from_scale(Vec3::splat(1.0)),
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_secs_f32(1.0));
+        app.update();
+
+        let mut query = app.world_mut().query::<(&GrowingTree, &Transform)>();
+        let (growing_tree, transform) = query
+            .get(app.world(), entity)
+            .expect("scalable tree components should exist");
+
+        assert_eq!(growing_tree.stage, GrowthStage::Sapling);
+        assert_eq!(transform.scale, Vec3::splat(2.0));
     }
 }
 
@@ -242,7 +590,11 @@ pub fn update_guardian_animation_from_state(
                     }
                     sprite.image = animations.idle_texture.clone();
                     // Keep the current facing row when changing animation state.
-                    update_animation_for_direction(*direction, &mut indices, animations.idle_frames);
+                    update_animation_for_direction(
+                        *direction,
+                        &mut indices,
+                        animations.idle_frames,
+                    );
                 }
                 EntityState::Moving => {
                     // Switch to walk animation
@@ -251,7 +603,11 @@ pub fn update_guardian_animation_from_state(
                     }
                     sprite.image = animations.walk_texture.clone();
                     // Keep the current facing row when changing animation state.
-                    update_animation_for_direction(*direction, &mut indices, animations.walk_frames);
+                    update_animation_for_direction(
+                        *direction,
+                        &mut indices,
+                        animations.walk_frames,
+                    );
                 }
                 EntityState::Attacking | EntityState::Dead => {
                     // For now, keep current animation for attacking/dead states
@@ -481,11 +837,42 @@ pub fn snail_dirt_trail(
 /// Works for any entity with a GrowingTree component (tree spirits, RTS trees, etc.)
 pub fn update_tree_growth(
     time: Res<Time>,
-    mut tree_query: Query<(&mut GrowingTree, &mut Transform)>,
+    assets: Option<Res<AssetServer>>,
+    mut texture_atlas_layouts: Option<ResMut<Assets<TextureAtlasLayout>>>,
+    mut variant_tree_query: Query<
+        (&mut GrowingTree, &mut Sprite, &mut Transform),
+        With<VariantTree>,
+    >,
+    mut scalable_tree_query: Query<(&mut GrowingTree, &mut Transform), Without<VariantTree>>,
 ) {
     let delta = time.delta_secs();
 
-    for (mut growing_tree, mut transform) in tree_query.iter_mut() {
+    for (mut growing_tree, mut sprite, mut transform) in variant_tree_query.iter_mut() {
+        if growing_tree.is_mature() {
+            continue;
+        }
+
+        growing_tree.time_in_stage += delta;
+
+        if growing_tree.time_in_stage >= growing_tree.time_to_next_stage {
+            if let Some(next_stage) = growing_tree.stage.next() {
+                growing_tree.stage = next_stage;
+                growing_tree.time_in_stage = 0.0;
+
+                apply_variant_tree_stage_visuals(
+                    &growing_tree,
+                    assets.as_ref(),
+                    texture_atlas_layouts.as_mut(),
+                    &mut sprite,
+                    &mut transform,
+                );
+
+                info!("Variant tree advanced to stage {:?}", next_stage);
+            }
+        }
+    }
+
+    for (mut growing_tree, mut transform) in scalable_tree_query.iter_mut() {
         if growing_tree.is_mature() {
             continue;
         }
@@ -509,6 +896,152 @@ pub fn update_tree_growth(
     }
 }
 
+fn apply_variant_tree_stage_visuals(
+    growing_tree: &GrowingTree,
+    assets: Option<&Res<AssetServer>>,
+    texture_atlas_layouts: Option<&mut ResMut<Assets<TextureAtlasLayout>>>,
+    sprite: &mut Sprite,
+    transform: &mut Transform,
+) {
+    if growing_tree.appearance.uses_shared_mature_sheet()
+        && matches!(
+            growing_tree.stage,
+            GrowthStage::YoungTree | GrowthStage::MatureTree
+        )
+    {
+        let index = (growing_tree.appearance.mature_row() * 4
+            + growing_tree
+                .variant
+                .shared_variation_column()
+                .expect("non-pine variants should have shared variation column"))
+            as usize;
+
+        if let Some(atlas) = &mut sprite.texture_atlas {
+            atlas.index = index;
+        }
+
+        if let (Some(assets), Some(texture_atlas_layouts)) = (assets, texture_atlas_layouts) {
+            let texture = assets.load(
+                growing_tree
+                    .variant
+                    .shared_variation_sheet_path()
+                    .expect("non-pine variants should have shared variation sheet"),
+            );
+            let layout = variant_tree_shared_variation_texture_atlas_layout(texture_atlas_layouts);
+            sprite.image = texture;
+            sprite.texture_atlas = Some(TextureAtlas { layout, index });
+        }
+    } else {
+        let index = growing_tree.stage.frame_index();
+
+        if let Some(atlas) = &mut sprite.texture_atlas {
+            atlas.index = index;
+        }
+
+        if let (Some(assets), Some(texture_atlas_layouts)) = (assets, texture_atlas_layouts) {
+            let texture = assets.load(growing_tree.variant.growth_stage_asset_path());
+            let layout = variant_tree_growth_texture_atlas_layout(
+                texture_atlas_layouts,
+                growing_tree.variant.growth_stage_frame_size(),
+            );
+
+            sprite.image = texture;
+            sprite.texture_atlas = Some(TextureAtlas { layout, index });
+        }
+    }
+
+    transform.scale = Vec3::splat(growing_tree.current_variant_tree_scale());
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SpawnLocationValidation {
+    nearest_tree_distance: Option<f32>,
+    nearby_tree_count: usize,
+}
+
+fn random_fraction(seed: u64) -> f32 {
+    (seed as f32) / (u64::MAX as f32)
+}
+
+fn mix_seed(seed: u64) -> u64 {
+    let mut value = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn candidate_spawn_position(
+    origin: &Position,
+    spawn_radius: f32,
+    angle_seed: u64,
+    distance_seed: u64,
+) -> Position {
+    use std::f32::consts::PI;
+
+    let angle = random_fraction(angle_seed) * 2.0 * PI;
+    let distance = random_fraction(distance_seed) * spawn_radius;
+
+    Position::new(
+        origin.x + angle.cos() * distance,
+        origin.y + angle.sin() * distance,
+    )
+}
+
+fn validate_spawn_location(
+    candidate: &Position,
+    tree_positions: &[Position],
+) -> SpawnLocationValidation {
+    let mut nearest_tree_distance: Option<f32> = None;
+    let mut nearby_tree_count = 0;
+
+    for tree_position in tree_positions {
+        let distance = candidate.distance_to(tree_position);
+        nearest_tree_distance = Some(match nearest_tree_distance {
+            Some(current) => current.min(distance),
+            None => distance,
+        });
+
+        if distance <= GUARDIAN_LOCAL_DENSITY_RADIUS {
+            nearby_tree_count += 1;
+        }
+    }
+
+    SpawnLocationValidation {
+        nearest_tree_distance,
+        nearby_tree_count,
+    }
+}
+
+fn is_spawn_location_valid(validation: SpawnLocationValidation) -> bool {
+    let spacing_ok = validation
+        .nearest_tree_distance
+        .is_none_or(|distance| distance >= GUARDIAN_MIN_TREE_SPACING);
+    let density_ok = validation.nearby_tree_count < GUARDIAN_LOCAL_TREE_CAP;
+
+    spacing_ok && density_ok
+}
+
+fn find_spawn_location(
+    origin: &Position,
+    spawn_radius: f32,
+    tree_positions: &[Position],
+    seed: u64,
+) -> Option<Position> {
+    for attempt in 0..GUARDIAN_SPAWN_ATTEMPTS {
+        let angle_seed = mix_seed(seed ^ attempt.wrapping_mul(0xA24B_AED4_963E_E407));
+        let distance_seed =
+            mix_seed(seed ^ attempt.wrapping_mul(0x9FB2_1C65_1E98_DF25) ^ 0xD1B5_4A32_D192_ED03);
+        let candidate = candidate_spawn_position(origin, spawn_radius, angle_seed, distance_seed);
+        let validation = validate_spawn_location(&candidate, tree_positions);
+
+        if is_spawn_location_valid(validation) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
 /// Spawns trees around entities with TreeSpawner component
 pub fn update_tree_spawning(
     time: Res<Time>,
@@ -516,9 +1049,9 @@ pub fn update_tree_spawning(
     assets: Res<AssetServer>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut spawner_query: Query<(&Position, &mut TreeSpawner, Option<&ForestGuardian>)>,
+    tree_query: Query<&Position, With<GrowingTree>>,
 ) {
     use std::collections::hash_map::RandomState;
-    use std::f32::consts::PI;
     use std::hash::{BuildHasher, Hash, Hasher};
 
     let delta = time.delta_secs();
@@ -537,18 +1070,24 @@ pub fn update_tree_spawning(
             std::time::SystemTime::now().hash(&mut hasher);
             let hash = hasher.finish();
 
-            // Random angle for tree placement
-            let rand_angle = ((hash as f32) / (u64::MAX as f32)) * 2.0 * PI;
+            let existing_tree_positions: Vec<Position> = tree_query.iter().copied().collect();
+            let Some(spawn_pos) = find_spawn_location(
+                position,
+                spawner.spawn_radius,
+                &existing_tree_positions,
+                hash,
+            ) else {
+                info!(
+                    "Skipped tree spawn at ({:.1}, {:.1}); area is already dense",
+                    position.x, position.y
+                );
+                reset_spawn_timer(&mut spawner, position, &hasher_builder);
+                continue;
+            };
 
-            // Random distance within spawn radius
             let mut hasher2 = hasher_builder.build_hasher();
-            (hash.wrapping_add(1)).hash(&mut hasher2);
+            (hash.wrapping_add(100)).hash(&mut hasher2);
             let hash2 = hasher2.finish();
-            let rand_distance = ((hash2 as f32) / (u64::MAX as f32)) * spawner.spawn_radius;
-
-            // Calculate spawn position
-            let spawn_x = position.x + rand_angle.cos() * rand_distance;
-            let spawn_y = position.y + rand_angle.sin() * rand_distance;
 
             // Determine tree variant based on guardian variant (if present)
             let tree_variant = if let Some(guardian) = guardian {
@@ -590,7 +1129,6 @@ pub fn update_tree_spawning(
             let hash_type = hasher_type.finish();
             let rand_type = (hash_type as f32) / (u64::MAX as f32);
 
-            let spawn_pos = Position::new(spawn_x, spawn_y);
             if rand_type < 0.9 {
                 // Spawn variant tree with matching tree type (90%)
                 spawn_variant_tree(
@@ -599,6 +1137,7 @@ pub fn update_tree_spawning(
                     tree_variant,
                     spawner.tree_growth_time,
                     &assets,
+                    &mut texture_atlas_layouts,
                 );
 
                 if let Some(guardian) = guardian {
@@ -607,8 +1146,8 @@ pub fn update_tree_spawning(
                         "{:?} guardian spawned {:?} variant tree at ({:.1}, {:.1}) {}",
                         guardian.variant,
                         tree_variant,
-                        spawn_x,
-                        spawn_y,
+                        spawn_pos.x,
+                        spawn_pos.y,
                         if is_matching {
                             "(matching)"
                         } else {
@@ -618,7 +1157,7 @@ pub fn update_tree_spawning(
                 } else {
                     info!(
                         "Entity spawned {:?} variant tree at ({:.1}, {:.1})",
-                        tree_variant, spawn_x, spawn_y
+                        tree_variant, spawn_pos.x, spawn_pos.y
                     );
                 }
             } else {
@@ -638,8 +1177,8 @@ pub fn update_tree_spawning(
                         "{:?} guardian spawned {:?} tree spirit at ({:.1}, {:.1}) {}",
                         guardian.variant,
                         tree_variant,
-                        spawn_x,
-                        spawn_y,
+                        spawn_pos.x,
+                        spawn_pos.y,
                         if is_matching {
                             "(matching)"
                         } else {
@@ -649,21 +1188,30 @@ pub fn update_tree_spawning(
                 } else {
                     info!(
                         "Entity spawned {:?} tree spirit at ({:.1}, {:.1})",
-                        tree_variant, spawn_x, spawn_y
+                        tree_variant, spawn_pos.x, spawn_pos.y
                     );
                 }
             }
 
-            // Reset spawn timer with random interval
-            let mut hasher_interval = hasher_builder.build_hasher();
-            position.x.to_bits().hash(&mut hasher_interval);
-            std::time::SystemTime::now().hash(&mut hasher_interval);
-            let hash_interval = hasher_interval.finish();
-            let rand_interval = (hash_interval as f32) / (u64::MAX as f32);
-            spawner.spawn_timer = spawner.min_spawn_interval
-                + rand_interval * (spawner.max_spawn_interval - spawner.min_spawn_interval);
+            reset_spawn_timer(&mut spawner, position, &hasher_builder);
         }
     }
+}
+
+fn reset_spawn_timer(
+    spawner: &mut TreeSpawner,
+    position: &Position,
+    hasher_builder: &std::collections::hash_map::RandomState,
+) {
+    use std::hash::{BuildHasher, Hash, Hasher};
+
+    let mut hasher_interval = hasher_builder.build_hasher();
+    position.x.to_bits().hash(&mut hasher_interval);
+    std::time::SystemTime::now().hash(&mut hasher_interval);
+    let hash_interval = hasher_interval.finish();
+    let rand_interval = (hash_interval as f32) / (u64::MAX as f32);
+    spawner.spawn_timer = spawner.min_spawn_interval
+        + rand_interval * (spawner.max_spawn_interval - spawner.min_spawn_interval);
 }
 
 /// Debug system to print entity information

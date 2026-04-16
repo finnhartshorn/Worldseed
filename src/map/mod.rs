@@ -6,6 +6,7 @@ pub use constants::*;
 pub use systems::*;
 pub use ui::*;
 
+use crate::AppState;
 use bevy::prelude::*;
 
 /// Plugin for the world map system
@@ -15,8 +16,12 @@ impl Plugin for MapPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MapConfig>()
             .init_resource::<MapState>()
-            .add_systems(Startup, setup_map_ui)
-            .add_systems(Update, (toggle_map_visibility, update_map_display));
+            .add_systems(OnEnter(AppState::InGame), (reset_map_state, setup_map_ui))
+            .add_systems(OnExit(AppState::InGame), cleanup_map_ui)
+            .add_systems(
+                Update,
+                (toggle_map_visibility, update_map_display).run_if(in_state(AppState::InGame)),
+            );
     }
 }
 

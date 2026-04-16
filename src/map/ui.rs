@@ -1,5 +1,15 @@
-use super::{MapContent, MapModal};
+use super::{MapContent, MapModal, MapState};
 use bevy::prelude::*;
+
+pub fn reset_map_state(mut map_state: ResMut<MapState>) {
+    map_state.visible = false;
+}
+
+pub fn cleanup_map_ui(mut commands: Commands, modal_query: Query<Entity, With<MapModal>>) {
+    for entity in &modal_query {
+        commands.entity(entity).despawn();
+    }
+}
 
 /// Sets up the map modal UI (hidden by default)
 pub fn setup_map_ui(mut commands: Commands) {
@@ -23,7 +33,6 @@ pub fn setup_map_ui(mut commands: Commands) {
             // Map content container (almost full screen, slightly inset)
             parent
                 .spawn((
-                    MapContent,
                     Node {
                         width: Val::Percent(95.0),
                         height: Val::Percent(95.0),

@@ -133,9 +133,9 @@ impl Health {
     }
 }
 
-/// Marker component for the player character
+/// Marker component for the human unit
 #[derive(Component)]
-pub struct Player;
+pub struct Human;
 
 /// Marker component for forest guardian creatures
 #[derive(Component, Debug, Clone, Copy)]
@@ -314,6 +314,15 @@ impl GrowthStage {
             GrowthStage::MatureTree => None,
         }
     }
+
+    pub fn frame_index(&self) -> usize {
+        match self {
+            GrowthStage::Seed => 0,
+            GrowthStage::Sapling => 1,
+            GrowthStage::YoungTree => 2,
+            GrowthStage::MatureTree => 3,
+        }
+    }
 }
 
 /// Component for trees that grow over time
@@ -327,6 +336,8 @@ pub struct GrowingTree {
     pub time_to_next_stage: f32,
     /// Tree variant (oak, birch, hickory, pine, willow)
     pub variant: TreeVariant,
+    /// Selected mature-look appearance for variant tree sprites.
+    pub appearance: VariantTreeAppearance,
     /// Multiplier applied on top of GrowthStage::scale().
     /// Tree spirits use 1.0 (atlas frames are pre-scaled 32×32 px).
     /// RTS trees use 2.0 so MatureTree (2.0 × 2.0 = 4.0) matches
@@ -341,6 +352,7 @@ impl GrowingTree {
             time_in_stage: 0.0,
             time_to_next_stage: 5.0,
             variant,
+            appearance: VariantTreeAppearance::Original,
             base_scale: 1.0,
         }
     }
@@ -351,6 +363,7 @@ impl GrowingTree {
             time_in_stage: 0.0,
             time_to_next_stage: growth_time,
             variant,
+            appearance: VariantTreeAppearance::Original,
             base_scale: 1.0,
         }
     }
@@ -361,6 +374,23 @@ impl GrowingTree {
             time_in_stage: 0.0,
             time_to_next_stage: growth_time,
             variant,
+            appearance: VariantTreeAppearance::Original,
+            base_scale,
+        }
+    }
+
+    pub fn with_variant_appearance(
+        variant: TreeVariant,
+        growth_time: f32,
+        base_scale: f32,
+        appearance: VariantTreeAppearance,
+    ) -> Self {
+        Self {
+            stage: GrowthStage::Seed,
+            time_in_stage: 0.0,
+            time_to_next_stage: growth_time,
+            variant,
+            appearance,
             base_scale,
         }
     }
@@ -373,6 +403,14 @@ impl GrowingTree {
     pub fn current_scale(&self) -> f32 {
         self.base_scale * self.stage.scale()
     }
+
+    pub fn current_variant_tree_scale(&self) -> f32 {
+        if self.appearance.uses_shared_mature_sheet() && self.stage == GrowthStage::YoungTree {
+            self.base_scale * 0.75
+        } else {
+            self.base_scale
+        }
+    }
 }
 
 /// Tree variants available
@@ -383,6 +421,29 @@ pub enum TreeVariant {
     Hickory,
     Pine,
     Willow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantTreeAppearance {
+    Original,
+    Variation1,
+    Variation2,
+    Variation3,
+}
+
+impl VariantTreeAppearance {
+    pub fn uses_shared_mature_sheet(&self) -> bool {
+        !matches!(self, VariantTreeAppearance::Original)
+    }
+
+    pub fn mature_row(&self) -> u32 {
+        match self {
+            VariantTreeAppearance::Original => 0,
+            VariantTreeAppearance::Variation1 => 1,
+            VariantTreeAppearance::Variation2 => 2,
+            VariantTreeAppearance::Variation3 => 3,
+        }
+    }
 }
 
 impl TreeVariant {
@@ -404,6 +465,61 @@ impl TreeVariant {
             "pine" => TreeVariant::Pine,
             "willow" => TreeVariant::Willow,
             _ => TreeVariant::Oak, // Default to oak
+        }
+    }
+
+    pub fn growth_stage_asset_path(&self) -> &'static str {
+        match self {
+            TreeVariant::Oak => "props/trees/Oak_growing_stages.png",
+            TreeVariant::Birch => "props/trees/Birch_growing_stages.png",
+            TreeVariant::Hickory => "props/trees/Hickory_growing_stages.png",
+            TreeVariant::Pine => "props/trees/Pine_growing_stages.png",
+            TreeVariant::Willow => "props/trees/Willow_growing_stages.png",
+        }
+    }
+
+    pub fn growth_stage_frame_size(&self) -> UVec2 {
+        match self {
+            TreeVariant::Oak => UVec2::new(32, 32),
+            TreeVariant::Birch => UVec2::new(48, 56),
+            TreeVariant::Hickory => UVec2::new(32, 32),
+            TreeVariant::Pine => UVec2::new(32, 40),
+            TreeVariant::Willow => UVec2::new(56, 48),
+        }
+    }
+
+    pub fn variant_tree_display_scale(&self) -> f32 {
+        4.0
+    }
+
+    pub fn has_extra_variations(&self) -> bool {
+        !matches!(self, TreeVariant::Pine)
+    }
+
+    pub fn shared_variation_sheet_path(&self) -> Option<&'static str> {
+        self.has_extra_variations()
+            .then_some("props/trees/MoreTrees.png")
+    }
+
+    pub fn shared_variation_column(&self) -> Option<u32> {
+        match self {
+            TreeVariant::Oak => Some(0),
+            TreeVariant::Hickory => Some(1),
+            TreeVariant::Willow => Some(2),
+            TreeVariant::Birch => Some(3),
+            TreeVariant::Pine => None,
+        }
+    }
+
+    pub fn choose_appearance(&self, rand_val: f32) -> VariantTreeAppearance {
+        if !self.has_extra_variations() || rand_val < 0.5 {
+            return VariantTreeAppearance::Original;
+        }
+
+        match (((rand_val - 0.5) / 0.5) * 3.0).floor() as usize {
+            0 => VariantTreeAppearance::Variation1,
+            1 => VariantTreeAppearance::Variation2,
+            _ => VariantTreeAppearance::Variation3,
         }
     }
 

@@ -1,17 +1,21 @@
 use super::{
-    Direction, EntityBundle, EntityState, ForestGuardian, GuardianAnimations, GrowingTree,
-    Player, Position, RenderStratum, RoamingBehavior, RtsTree, RtsTreeVariant, Snail, TreeSpawner,
-    TreeSpirit, TreeVariant, VariantTree, WindingPath, WorldRenderDepth,
+    Direction, EntityBundle, EntityState, ForestGuardian, GrowingTree, GuardianAnimations, Human,
+    Position, RenderStratum, RoamingBehavior, RtsTree, RtsTreeVariant, Snail, TreeSpawner,
+    TreeSpirit, TreeVariant, VariantTree, VariantTreeAppearance, WindingPath, WorldRenderDepth,
 };
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
 
-const PLAYER_DEPTH_BIAS: f32 = 0.0004;
-const FOREST_GUARDIAN_DEPTH_BIAS: f32 = 0.0003;
-const SNAIL_DEPTH_BIAS: f32 = 0.0002;
-const TREE_SPIRIT_DEPTH_BIAS: f32 = -0.0001;
-const RTS_TREE_DEPTH_BIAS: f32 = -0.0002;
-const VARIANT_TREE_DEPTH_BIAS: f32 = -0.0003;
+// Keep world-object biases below one y-sort step so vertical position, not bias,
+// determines draw order except at effectively identical foot positions.
+pub(crate) const PLAYER_DEPTH_BIAS: f32 = 0.000004;
+pub(crate) const FOREST_GUARDIAN_DEPTH_BIAS: f32 = 0.000003;
+pub(crate) const SNAIL_DEPTH_BIAS: f32 = 0.000002;
+pub(crate) const TREE_SPIRIT_DEPTH_BIAS: f32 = -0.000001;
+pub(crate) const RTS_TREE_DEPTH_BIAS: f32 = -0.000002;
+pub(crate) const VARIANT_TREE_DEPTH_BIAS: f32 = -0.000003;
 
 fn world_anchor() -> Anchor {
     Anchor::BOTTOM_CENTER
@@ -41,56 +45,93 @@ fn add_uniform_crop_layout(
 pub fn human_texture_atlas_layout(
     texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
 ) -> Handle<TextureAtlasLayout> {
-    add_uniform_crop_layout(
-        texture_atlas_layouts,
-        4,
-        4,
-        URect::new(12, 11, 20, 19),
-    )
+    add_uniform_crop_layout(texture_atlas_layouts, 4, 4, URect::new(12, 11, 20, 19))
 }
 
 pub fn guardian_texture_atlas_layout(
     texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
 ) -> Handle<TextureAtlasLayout> {
-    add_uniform_crop_layout(
-        texture_atlas_layouts,
-        8,
-        4,
-        URect::new(8, 0, 24, 21),
-    )
+    add_uniform_crop_layout(texture_atlas_layouts, 8, 4, URect::new(8, 0, 24, 21))
 }
 
 pub fn guardian_walk_texture_atlas_layout(
     texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
 ) -> Handle<TextureAtlasLayout> {
-    add_uniform_crop_layout(
-        texture_atlas_layouts,
-        6,
-        4,
-        URect::new(8, 0, 24, 21),
-    )
+    add_uniform_crop_layout(texture_atlas_layouts, 6, 4, URect::new(8, 0, 24, 21))
 }
 
 pub fn snail_texture_atlas_layout(
     texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
 ) -> Handle<TextureAtlasLayout> {
-    add_uniform_crop_layout(
-        texture_atlas_layouts,
-        4,
-        4,
-        URect::new(0, 8, 32, 19),
-    )
+    add_uniform_crop_layout(texture_atlas_layouts, 4, 4, URect::new(0, 8, 32, 19))
 }
 
 pub fn tree_spirit_texture_atlas_layout(
     texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
 ) -> Handle<TextureAtlasLayout> {
-    add_uniform_crop_layout(
-        texture_atlas_layouts,
-        8,
-        4,
-        URect::new(12, 10, 20, 19),
-    )
+    add_uniform_crop_layout(texture_atlas_layouts, 8, 4, URect::new(12, 10, 20, 19))
+}
+
+pub fn variant_tree_growth_texture_atlas_layout(
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+    frame_size: UVec2,
+) -> Handle<TextureAtlasLayout> {
+    let mut layout = TextureAtlasLayout::new_empty(UVec2::new(frame_size.x * 4, frame_size.y));
+
+    for col in 0..4 {
+        let origin = UVec2::new(col * frame_size.x, 0);
+        layout.add_texture(URect {
+            min: origin,
+            max: origin + frame_size,
+        });
+    }
+
+    texture_atlas_layouts.add(layout)
+}
+
+pub fn variant_tree_shared_variation_texture_atlas_layout(
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+) -> Handle<TextureAtlasLayout> {
+    let mut layout = TextureAtlasLayout::new_empty(UVec2::new(192, 240));
+    let rects = [
+        URect::new(13, 38, 34, 63),
+        URect::new(49, 32, 79, 63),
+        URect::new(88, 21, 128, 63),
+        URect::new(137, 9, 167, 63),
+        URect::new(14, 78, 34, 103),
+        URect::new(50, 64, 78, 103),
+        URect::new(96, 74, 121, 103),
+        URect::new(137, 68, 167, 103),
+        URect::new(11, 145, 35, 167),
+        URect::new(48, 129, 78, 167),
+        URect::new(93, 122, 124, 167),
+        URect::new(137, 106, 183, 167),
+        URect::new(10, 202, 37, 231),
+        URect::new(49, 184, 79, 231),
+        URect::new(91, 186, 125, 231),
+        URect::new(137, 170, 183, 231),
+    ];
+
+    for rect in rects {
+        layout.add_texture(rect);
+    }
+
+    texture_atlas_layouts.add(layout)
+}
+
+pub fn choose_variant_tree_appearance(
+    variant: TreeVariant,
+    position: Position,
+) -> VariantTreeAppearance {
+    let hasher_builder = RandomState::new();
+    let mut hasher = hasher_builder.build_hasher();
+    variant.as_str().hash(&mut hasher);
+    position.x.to_bits().hash(&mut hasher);
+    position.y.to_bits().hash(&mut hasher);
+    std::time::SystemTime::now().hash(&mut hasher);
+
+    let rand_val = (hasher.finish() as f32) / (u64::MAX as f32);
+    variant.choose_appearance(rand_val)
 }
 
 /// Animation components
@@ -115,8 +156,8 @@ impl AnimationTimer {
     }
 }
 
-/// Spawns a player character at the given position
-pub fn spawn_player(
+/// Spawns a human unit at the given position
+pub fn spawn_human(
     commands: &mut Commands,
     position: Position,
     assets: &Res<AssetServer>,
@@ -127,7 +168,7 @@ pub fn spawn_player(
 
     commands
         .spawn((
-            Player,
+            Human,
             EntityBundle::new(position.x, position.y, 100.0),
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, PLAYER_DEPTH_BIAS),
             Sprite::from_atlas_image(
@@ -185,8 +226,8 @@ pub fn spawn_forest_guardian(
             ),
             world_anchor(),
             Transform::from_xyz(position.x, position.y, 0.0),
-            AnimationIndices::new(0, 7),    // First row, 8 frames (idle has 8 frames per direction)
-            AnimationTimer::from_fps(4.0),  // Slower idle animation
+            AnimationIndices::new(0, 7), // First row, 8 frames (idle has 8 frames per direction)
+            AnimationTimer::from_fps(4.0), // Slower idle animation
             GuardianAnimations {
                 idle_texture,
                 idle_layout,
@@ -319,32 +360,45 @@ pub fn spawn_rts_tree(
         .id()
 }
 
-/// Spawns a variant tree from the Crafting And Professions pack that grows over time.
+/// Spawns a variant tree from a per-variant four-stage growth sheet.
 ///
 /// Variant trees come in 5 types matching TreeVariant: Oak, Birch, Hickory, Pine, Willow.
-/// Each type has a unique size and appearance from the spritesheet.
-/// Uses `Sprite::rect` to crop the appropriate variant from the source image.
-///
-/// `base_scale` is set to 2.0 for standard 4× pixel-art display scale at maturity.
+/// Each type starts on frame 0 (Seed) and advances to frame 3 (MatureTree).
 pub fn spawn_variant_tree(
     commands: &mut Commands,
     position: Position,
     variant: TreeVariant,
     growth_time: f32,
     assets: &Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
 ) -> Entity {
-    let texture = assets.load("props/trees/Minifantasy_CraftingAndProfessionsLogging.png");
+    let early_texture = assets.load(variant.growth_stage_asset_path());
+    let early_texture_atlas_layout = variant_tree_growth_texture_atlas_layout(
+        texture_atlas_layouts,
+        variant.growth_stage_frame_size(),
+    );
+    let appearance = choose_variant_tree_appearance(variant, position);
+    let initial_scale = variant.variant_tree_display_scale();
+    let growing_tree =
+        GrowingTree::with_variant_appearance(variant, growth_time, initial_scale, appearance);
 
-    let rect = match variant {
-        TreeVariant::Oak => Rect::new(13.0, 38.0, 34.0, 63.0),
-        TreeVariant::Birch => Rect::new(177.0, 9.0, 207.0, 63.0),
-        TreeVariant::Hickory => Rect::new(49.0, 32.0, 79.0, 63.0),
-        TreeVariant::Pine => Rect::new(93.0, 24.0, 115.0, 63.0),
-        TreeVariant::Willow => Rect::new(128.0, 21.0, 168.0, 63.0),
+    let sprite = if appearance.uses_shared_mature_sheet() {
+        Sprite::from_atlas_image(
+            early_texture,
+            TextureAtlas {
+                layout: early_texture_atlas_layout,
+                index: 0,
+            },
+        )
+    } else {
+        Sprite::from_atlas_image(
+            early_texture,
+            TextureAtlas {
+                layout: early_texture_atlas_layout,
+                index: 0,
+            },
+        )
     };
-
-    let growing_tree = GrowingTree::with_base_scale(variant, growth_time, 2.0);
-    let initial_scale = growing_tree.current_scale();
 
     commands
         .spawn((
@@ -352,11 +406,7 @@ pub fn spawn_variant_tree(
             growing_tree,
             Position::new(position.x, position.y),
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, VARIANT_TREE_DEPTH_BIAS),
-            Sprite {
-                image: texture,
-                rect: Some(rect),
-                ..default()
-            },
+            sprite,
             world_anchor(),
             Transform::from_xyz(position.x, position.y, 0.0).with_scale(Vec3::splat(initial_scale)),
         ))

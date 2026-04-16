@@ -1,6 +1,7 @@
 pub mod generator;
 pub mod loader;
 pub mod manager;
+pub mod savegame;
 pub mod serialization;
 
 // Re-export commonly used items
