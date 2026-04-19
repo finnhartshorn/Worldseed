@@ -16,6 +16,8 @@ const GUARDIAN_MIN_TREE_SPACING: f32 = 24.0;
 const GUARDIAN_LOCAL_DENSITY_RADIUS: f32 = 40.0;
 const GUARDIAN_LOCAL_TREE_CAP: usize = 3;
 const GUARDIAN_SPAWN_ATTEMPTS: u64 = 4;
+const ROAMING_TARGET_ATTEMPTS: u64 = 6;
+const WINDING_PATH_REDIRECTION_ATTEMPTS: u64 = 8;
 
 /// Syncs world positions into sprite transforms and assigns deterministic depth.
 pub fn sync_world_render_transform(
@@ -31,12 +33,92 @@ pub fn sync_world_render_transform(
     }
 }
 
+fn is_land_position(world: &mut WorldManager, position: &Position) -> bool {
+    world.has_land_at_world(Vec2::new(position.x, position.y))
+}
+
+fn is_land_vec2(world: &mut WorldManager, world_pos: Vec2) -> bool {
+    world.has_land_at_world(world_pos)
+}
+
+fn random_angle_from_seed(seed: u64) -> f32 {
+    use std::f32::consts::TAU;
+
+    ((seed as f32) / (u64::MAX as f32)) * TAU
+}
+
+fn pick_roaming_target(
+    world: &mut WorldManager,
+    roaming: &RoamingBehavior,
+    seed: u64,
+) -> Option<Position> {
+    for attempt in 0..ROAMING_TARGET_ATTEMPTS {
+        let angle_seed = mix_seed(seed ^ attempt.wrapping_mul(0xA24B_AED4_963E_E407));
+        let distance_seed =
+            mix_seed(seed ^ attempt.wrapping_mul(0x9FB2_1C65_1E98_DF25) ^ 0xD1B5_4A32_D192_ED03);
+        let rand_angle = random_angle_from_seed(angle_seed);
+        let rand_distance = random_fraction(distance_seed) * roaming.roam_radius;
+        let candidate = Position::new(
+            roaming.home.x + rand_angle.cos() * rand_distance,
+            roaming.home.y + rand_angle.sin() * rand_distance,
+        );
+
+        if is_land_position(world, &candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn pick_winding_path_redirection(
+    world: &mut WorldManager,
+    position: &Position,
+    path: &WindingPath,
+    delta: f32,
+    seed: u64,
+) -> Option<f32> {
+    use std::f32::consts::PI;
+
+    for attempt in 0..WINDING_PATH_REDIRECTION_ATTEMPTS {
+        let attempt_seed = mix_seed(seed ^ attempt.wrapping_mul(0x94D0_49BB_1331_11EB));
+        let rand1 = random_fraction(attempt_seed) - 0.5;
+        let candidate_angle =
+            (path.current_angle + rand1 * 2.0 * path.max_angle_change).rem_euclid(2.0 * PI);
+        let next_position = Vec2::new(
+            position.x + candidate_angle.cos() * path.speed * delta,
+            position.y + candidate_angle.sin() * path.speed * delta,
+        );
+
+        if is_land_vec2(world, next_position) {
+            return Some(candidate_angle);
+        }
+    }
+
+    None
+}
+
 /// Updates entity position based on velocity
-pub fn apply_velocity(time: Res<Time>, mut query: Query<(&mut Position, &Velocity)>) {
+pub fn apply_velocity(
+    time: Res<Time>,
+    mut world: ResMut<WorldManager>,
+    mut query: Query<(&mut Position, &mut Velocity)>,
+) {
     let delta = time.delta_secs();
-    for (mut position, velocity) in &mut query {
-        position.x += velocity.x * delta;
-        position.y += velocity.y * delta;
+    for (mut position, mut velocity) in &mut query {
+        let next_position = Vec2::new(
+            position.x + velocity.x * delta,
+            position.y + velocity.y * delta,
+        );
+
+        if (velocity.x != 0.0 || velocity.y != 0.0) && !is_land_vec2(&mut world, next_position) {
+            velocity.x = 0.0;
+            velocity.y = 0.0;
+            continue;
+        }
+
+        position.x = next_position.x;
+        position.y = next_position.y;
     }
 }
 
@@ -662,10 +744,10 @@ pub fn animate_sprite(
 /// This makes entities roam randomly within a fixed radius of their home position
 pub fn update_roaming_behavior(
     time: Res<Time>,
+    mut world: ResMut<WorldManager>,
     mut query: Query<(&Position, &mut Velocity, &mut RoamingBehavior)>,
 ) {
     use std::collections::hash_map::RandomState;
-    use std::f32::consts::PI;
     use std::hash::{BuildHasher, Hash, Hasher};
     let delta = time.delta_secs();
 
@@ -687,25 +769,12 @@ pub fn update_roaming_behavior(
             position.y.to_bits().hash(&mut hasher);
             std::time::SystemTime::now().hash(&mut hasher);
             let hash = hasher.finish();
-
-            // Random angle
-            let rand_angle = ((hash as f32) / (u64::MAX as f32)) * 2.0 * PI;
-
-            // Random distance within roam radius
-            let mut hasher2 = hasher_builder.build_hasher();
-            (hash.wrapping_add(1)).hash(&mut hasher2);
-            let hash2 = hasher2.finish();
-            let rand_distance = ((hash2 as f32) / (u64::MAX as f32)) * roaming.roam_radius;
-
-            // Calculate new target position within bounds
-            let offset_x = rand_angle.cos() * rand_distance;
-            let offset_y = rand_angle.sin() * rand_distance;
-            roaming.target.x = roaming.home.x + offset_x;
-            roaming.target.y = roaming.home.y + offset_y;
+            roaming.target =
+                pick_roaming_target(&mut world, &roaming, hash).unwrap_or(roaming.home);
 
             // Generate random pause duration
             let mut hasher3 = hasher_builder.build_hasher();
-            (hash2.wrapping_add(1)).hash(&mut hasher3);
+            (hash.wrapping_add(1)).hash(&mut hasher3);
             let hash3 = hasher3.finish();
             let rand_pause = (hash3 as f32) / (u64::MAX as f32);
             roaming.pause_duration = roaming.min_pause_duration
@@ -731,21 +800,37 @@ pub fn update_roaming_behavior(
             // Move towards target at roaming speed
             let dir_x = dx / distance;
             let dir_y = dy / distance;
-            velocity.x = dir_x * roaming.speed;
-            velocity.y = dir_y * roaming.speed;
+            let next_position = Vec2::new(
+                position.x + dir_x * roaming.speed * delta,
+                position.y + dir_y * roaming.speed * delta,
+            );
+            if is_land_vec2(&mut world, next_position) {
+                velocity.x = dir_x * roaming.speed;
+                velocity.y = dir_y * roaming.speed;
+            } else {
+                roaming.target = roaming.home;
+                velocity.x = 0.0;
+                velocity.y = 0.0;
+            }
         }
     }
 }
 
 /// Updates velocity for entities with winding path behavior
 /// This creates smooth, meandering movement with long straight sections
-pub fn update_winding_path(time: Res<Time>, mut query: Query<(&mut Velocity, &mut WindingPath)>) {
+pub fn update_winding_path(
+    time: Res<Time>,
+    mut world: ResMut<WorldManager>,
+    mut query: Query<(&Position, &mut Velocity, &mut WindingPath)>,
+) {
     use std::collections::hash_map::RandomState;
     use std::f32::consts::PI;
     use std::hash::{BuildHasher, Hash, Hasher};
     let delta = time.delta_secs();
 
-    for (mut velocity, mut path) in &mut query {
+    for (position, mut velocity, mut path) in &mut query {
+        let hasher_builder = RandomState::new();
+
         // Calculate distance moved this frame
         let speed = path.speed;
         let distance_this_frame = speed * delta;
@@ -754,7 +839,6 @@ pub fn update_winding_path(time: Res<Time>, mut query: Query<(&mut Velocity, &mu
         // Check if we've reached the end of current segment
         if path.distance_traveled >= path.segment_length {
             // Generate random numbers using hash
-            let hasher_builder = RandomState::new();
             let mut hasher = hasher_builder.build_hasher();
             (path.current_angle.to_bits() as u64).hash(&mut hasher);
             path.distance_traveled.to_bits().hash(&mut hasher);
@@ -805,6 +889,30 @@ pub fn update_winding_path(time: Res<Time>, mut query: Query<(&mut Velocity, &mu
         // Update velocity based on current angle
         velocity.x = path.current_angle.cos() * speed;
         velocity.y = path.current_angle.sin() * speed;
+
+        let next_position = Vec2::new(
+            position.x + velocity.x * delta,
+            position.y + velocity.y * delta,
+        );
+        if !is_land_vec2(&mut world, next_position) {
+            velocity.x = 0.0;
+            velocity.y = 0.0;
+            let mut hasher = hasher_builder.build_hasher();
+            position.x.to_bits().hash(&mut hasher);
+            position.y.to_bits().hash(&mut hasher);
+            path.current_angle.to_bits().hash(&mut hasher);
+            std::time::SystemTime::now().hash(&mut hasher);
+            let redirect_seed = hasher.finish();
+
+            if let Some(new_angle) =
+                pick_winding_path_redirection(&mut world, position, &path, delta, redirect_seed)
+            {
+                path.current_angle = new_angle;
+                path.target_angle = new_angle;
+            }
+
+            path.distance_traveled = path.segment_length;
+        }
     }
 }
 
@@ -1045,6 +1153,7 @@ fn find_spawn_location(
 /// Spawns trees around entities with TreeSpawner component
 pub fn update_tree_spawning(
     time: Res<Time>,
+    mut world: ResMut<WorldManager>,
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
@@ -1084,6 +1193,15 @@ pub fn update_tree_spawning(
                 reset_spawn_timer(&mut spawner, position, &hasher_builder);
                 continue;
             };
+
+            if !is_land_position(&mut world, &spawn_pos) {
+                info!(
+                    "Skipped tree spawn at ({:.1}, {:.1}); candidate landed in void",
+                    spawn_pos.x, spawn_pos.y
+                );
+                reset_spawn_timer(&mut spawner, position, &hasher_builder);
+                continue;
+            }
 
             let mut hasher2 = hasher_builder.build_hasher();
             (hash.wrapping_add(100)).hash(&mut hasher2);

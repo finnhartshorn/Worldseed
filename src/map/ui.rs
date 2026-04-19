@@ -3,6 +3,7 @@ use bevy::prelude::*;
 
 pub fn reset_map_state(mut map_state: ResMut<MapState>) {
     map_state.visible = false;
+    map_state.active_sample_size_index = MapState::default().active_sample_size_index;
 }
 
 pub fn cleanup_map_ui(mut commands: Commands, modal_query: Query<Entity, With<MapModal>>) {
@@ -45,7 +46,7 @@ pub fn setup_map_ui(mut commands: Commands) {
                 .with_children(|parent| {
                     // Title bar
                     parent.spawn((
-                        Text::new("World Map (Press 'M' to close)"),
+                        Text::new("Loaded World Minimap (M closes, -/= changes resolution)"),
                         TextFont {
                             font_size: 24.0,
                             ..default()
@@ -69,20 +70,6 @@ pub fn setup_map_ui(mut commands: Commands) {
                             ..default()
                         },
                         BackgroundColor(Color::srgb(0.1, 0.1, 0.15)),
-                    ));
-
-                    // Config display at bottom
-                    parent.spawn((
-                        Text::new("Chunks per map tile: 4 (configurable)"),
-                        TextFont {
-                            font_size: 14.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.8, 0.8, 0.8)),
-                        Node {
-                            margin: UiRect::top(Val::Px(20.0)),
-                            ..default()
-                        },
                     ));
                 });
         });

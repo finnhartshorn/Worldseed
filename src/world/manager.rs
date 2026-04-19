@@ -1,6 +1,9 @@
-use crate::tiles::{Chunk, ChunkData, ChunkPos};
+use super::{generator, savegame::WorldShape, serialization};
+use crate::tiles::{
+    chunk::coords, ChunkData, ChunkPos, TileId, CHUNK_PIXEL_SIZE, LAYER_GROUND, TILE_EMPTY,
+};
+use crate::world::savegame::WorldGenerationConfig;
 use bevy::prelude::*;
-use bevy::sprite_render::{TileData, TilemapChunkTileData};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -39,6 +42,9 @@ pub struct WorldManager {
     /// Current camera chunk position (for loading/unloading decisions)
     pub camera_chunk: Option<ChunkPos>,
 
+    /// Active world-generation config for newly generated chunks
+    pub generation: WorldGenerationConfig,
+
     /// Queue of pending tile modifications
     pub pending_tile_modifications: Vec<TileModification>,
 }
@@ -51,6 +57,7 @@ impl WorldManager {
             chunk_cache: HashMap::new(),
             save_directory,
             camera_chunk: None,
+            generation: WorldGenerationConfig::default(),
             pending_tile_modifications: Vec::new(),
         }
     }
@@ -128,6 +135,55 @@ impl WorldManager {
             .join(format!("chunk_{}_{}.bin", pos.x, pos.y))
     }
 
+    /// Ensure chunk data exists in cache, loading from disk or generating it when needed.
+    pub fn ensure_chunk_cached(&mut self, chunk_pos: ChunkPos) {
+        if self.chunk_cache.contains_key(&chunk_pos) {
+            return;
+        }
+
+        let chunk_path = self.get_chunk_path(&chunk_pos);
+        let chunk_data = if serialization::chunk_exists(&chunk_path) {
+            match serialization::load_chunk(&chunk_path) {
+                Ok(data) => data,
+                Err(error) => {
+                    warn!(
+                        "Failed to load chunk {:?}: {}, falling back to generated data",
+                        chunk_pos, error
+                    );
+                    match self.generation.shape {
+                        WorldShape::Island => ChunkData::empty(chunk_pos),
+                        WorldShape::Infinity => generator::generate_chunk(chunk_pos, self.generation),
+                    }
+                }
+            }
+        } else {
+            match self.generation.shape {
+                WorldShape::Island => ChunkData::empty(chunk_pos),
+                WorldShape::Infinity => generator::generate_chunk(chunk_pos, self.generation),
+            }
+        };
+
+        self.cache_chunk(chunk_data);
+    }
+
+    /// Return the ground tile at a world-space position, loading the chunk into cache if needed.
+    pub fn ground_tile_at_world(&mut self, world_pos: Vec2) -> TileId {
+        let chunk_pos = ChunkPos::from_world(world_pos, CHUNK_PIXEL_SIZE);
+        self.ensure_chunk_cached(chunk_pos);
+
+        let Some(chunk) = self.chunk_cache.get(&chunk_pos) else {
+            return TILE_EMPTY;
+        };
+
+        let (local_x, local_y) = coords::world_to_local_tile(world_pos);
+        chunk.get_tile(LAYER_GROUND, local_x, local_y).unwrap_or(TILE_EMPTY)
+    }
+
+    /// Void is represented by an empty ground tile. Land checks should go through this helper.
+    pub fn has_land_at_world(&mut self, world_pos: Vec2) -> bool {
+        self.ground_tile_at_world(world_pos) != TILE_EMPTY
+    }
+
     /// Update the camera's chunk position
     pub fn update_camera_position(&mut self, chunk_pos: ChunkPos) {
         self.camera_chunk = Some(chunk_pos);
@@ -188,5 +244,29 @@ impl std::fmt::Display for WorldStats {
             "Loaded: {}, Dirty: {}, Cached: {}, Camera: {:?}",
             self.loaded_chunks, self.dirty_chunks, self.cached_chunks, self.camera_chunk
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tiles::{CHUNK_SIZE, TILE_GRASS, TILE_WORLD_SIZE};
+
+    #[test]
+    fn has_land_at_world_reads_ground_tiles_from_cache() {
+        let mut world = WorldManager::default();
+        let chunk_pos = ChunkPos::new(0, 0);
+        let mut chunk = ChunkData::empty(chunk_pos);
+        chunk.set_tile(LAYER_GROUND, 3, 4, TILE_GRASS);
+        world.cache_chunk(chunk);
+
+        let land_pos = Vec2::new(3.0 * TILE_WORLD_SIZE + 1.0, 4.0 * TILE_WORLD_SIZE + 1.0);
+        let void_pos = Vec2::new(
+            (CHUNK_SIZE as f32 - 1.0) * TILE_WORLD_SIZE,
+            (CHUNK_SIZE as f32 - 1.0) * TILE_WORLD_SIZE,
+        );
+
+        assert!(world.has_land_at_world(land_pos));
+        assert!(!world.has_land_at_world(void_pos));
     }
 }

@@ -4,7 +4,7 @@ use bevy::{
     input::mouse::MouseWheel,
     picking::pointer::PointerButton,
     prelude::*,
-    sprite::Anchor,
+    sprite::{Anchor, SpritePickingMode, SpritePickingSettings},
     sprite_render::TilemapChunk,
     window::PrimaryWindow,
 };
@@ -31,7 +31,8 @@ mod tiles;
 mod world;
 
 use draft::cards::{
-    label_plate_height, set_icon as set_draft_card_icon, DraftCard, ALL_DRAFT_CARDS,
+    label_plate_height, set_icon as set_draft_card_icon, DraftCard, DraftCardCategory,
+    VISIBLE_DRAFT_CARDS,
 };
 use entities::{
     animate_sprite, apply_velocity, snail_dirt_trail, spawn_forest_guardian, spawn_human,
@@ -41,18 +42,19 @@ use entities::{
     update_guardian_animation_from_state, update_roaming_behavior, update_state_from_velocity,
     update_tree_growth, update_tree_spawning, update_winding_path, Direction, ForestGuardian,
     GrowingTree, Health, Human, Position, RoamingBehavior, SavedActorState, Snail, TreeSpawner,
-    TreeSpirit, TreeVariant, VariantTree, Velocity, WindingPath, WorldRenderDepth,
+    TreeSpirit, TreeVariant, VariantTree, Velocity, WindingPath, WorldClickableEntity,
+    WorldRenderDepth,
 };
-use map::MapPlugin;
+use map::{MapModal, MapPlugin, MapState};
 use tiles::constants::{LAYER_GROUND, TILE_DIRT, TILE_GRASS, TILE_WORLD_SIZE};
 use world::{
     entities_save::{
         self, SavedActor, SavedEntity, SavedForestGuardian, SavedGrowingTreeEntity, SavedSnail,
         SavedWorldEntities,
     },
-    loader,
+    loader, pregenerate_world_chunks,
     savegame::{self, SaveSlotMetadata, WorldMetadata},
-    WorldManager,
+    WorldElement, WorldGenerationConfig, WorldManager, WorldShape,
 };
 
 // UI sprite vertical offsets for proper centering
@@ -66,8 +68,8 @@ const BLOOM_HALO_EXTRA_SIZE: f32 = 28.0;
 const BLOOM_HALO_DURATION: f32 = 0.35;
 const WORLD_CLICK_HALO_EXTRA_SIZE: f32 = 28.0;
 const WORLD_CLICK_HALO_PADDING: f32 = 12.0;
-const WORLD_ENTITY_CLICK_PADDING: f32 = 6.0;
 const WORLD_CLICK_HALO_DEPTH_OFFSET: f32 = 0.001;
+const WORLD_ENTITY_ALPHA_THRESHOLD: f32 = 0.1;
 
 // Camera zoom configuration
 const ZOOM_MIN: f32 = 0.5; // Max zoom in (smaller = more zoomed in)
@@ -448,10 +450,16 @@ struct DraftPlacedCardVisual;
 struct DraftPlacedCardIcon;
 
 #[derive(Component)]
+struct DraftPlacedCardInfinityIcon;
+
+#[derive(Component)]
 struct DraftCardFrame;
 
 #[derive(Component)]
 struct DraftCardIcon;
+
+#[derive(Component)]
+struct DraftCardInfinityIcon;
 
 #[derive(Component)]
 struct DraftCardGhost;
@@ -461,6 +469,9 @@ struct DraftConfirmButton;
 
 #[derive(Component)]
 struct MainMenuButtonImage;
+
+#[derive(Component)]
+struct DraftConfirmButtonLabel;
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 struct DraftCardTypeComponent(DraftCard);
@@ -605,10 +616,6 @@ impl DraftBoard {
             && self.is_row_unlocked_with_omission(column, row - 1, omitted)
     }
 
-    fn can_place(&self, column: usize, row: usize) -> bool {
-        self.can_place_with_omission(column, row, None)
-    }
-
     fn can_place_with_omission(
         &self,
         column: usize,
@@ -618,8 +625,34 @@ impl DraftBoard {
         self.is_row_unlocked_with_omission(column, row, omitted)
     }
 
+    fn allowed_category(&self, row: usize) -> Option<DraftCardCategory> {
+        match row {
+            0 => Some(DraftCardCategory::Shape),
+            1 => Some(DraftCardCategory::Element),
+            _ => None,
+        }
+    }
+
+    fn can_place_card(&self, column: usize, row: usize, card: DraftCard) -> bool {
+        self.can_place_card_with_omission(column, row, card, None)
+    }
+
+    fn can_place_card_with_omission(
+        &self,
+        column: usize,
+        row: usize,
+        card: DraftCard,
+        omitted: Option<DraftCellPosition>,
+    ) -> bool {
+        self.can_place_with_omission(column, row, omitted)
+            && self
+                .allowed_category(row)
+                .map(|category| category == card.category())
+                .unwrap_or(false)
+    }
+
     fn place_card(&mut self, column: usize, row: usize, card: DraftCard) -> bool {
-        if !self.can_place(column, row) {
+        if !self.can_place_card(column, row, card) {
             return false;
         }
 
@@ -651,6 +684,107 @@ impl DraftBoard {
             }
         }
     }
+
+    fn recipe_card(&self, row: usize) -> Option<DraftCard> {
+        self.card_at(0, row)
+    }
+}
+
+fn recipe_shape(card: DraftCard) -> Option<WorldShape> {
+    match card {
+        DraftCard::Island => Some(WorldShape::Island),
+        DraftCard::Infinity => Some(WorldShape::Infinity),
+        _ => None,
+    }
+}
+
+fn recipe_element(card: DraftCard) -> Option<WorldElement> {
+    match card {
+        DraftCard::Grass => Some(WorldElement::Grass),
+        DraftCard::Dirt => Some(WorldElement::Dirt),
+        _ => None,
+    }
+}
+
+fn draft_generation_config(board: &DraftBoard) -> Option<WorldGenerationConfig> {
+    Some(WorldGenerationConfig {
+        shape: recipe_shape(board.recipe_card(0)?)?,
+        element: recipe_element(board.recipe_card(1)?)?,
+        ..WorldGenerationConfig::default()
+    })
+}
+
+fn draft_confirm_enabled(board: &DraftBoard) -> bool {
+    draft_generation_config(board).is_some()
+}
+
+fn apply_draft_card_icon(
+    image_node: &mut ImageNode,
+    image_style: &mut Node,
+    infinity_style: &mut Node,
+    card: DraftCard,
+    assets: Option<&AssetServer>,
+    texture_atlas_layouts: Option<&mut Assets<TextureAtlasLayout>>,
+) {
+    if card == DraftCard::Infinity {
+        image_node.image = Handle::default();
+        image_node.rect = None;
+        image_node.texture_atlas = None;
+        image_style.display = Display::None;
+        infinity_style.display = Display::Flex;
+    } else {
+        set_draft_card_icon(image_node, card, assets, texture_atlas_layouts);
+        image_style.display = Display::Flex;
+        infinity_style.display = Display::None;
+    }
+}
+
+fn spawn_infinity_icon(parent: &mut ChildSpawnerCommands, marker: impl Bundle, visible: bool) {
+    parent
+        .spawn((
+            marker,
+            Node {
+                width: Val::Px(DRAFT_CARD_ICON_SIZE),
+                height: Val::Px(DRAFT_CARD_ICON_SIZE * 0.72),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(DRAFT_CARD_ICON_SIZE * 0.08),
+                display: if visible {
+                    Display::Flex
+                } else {
+                    Display::None
+                },
+                ..default()
+            },
+        ))
+        .with_children(|icon| {
+            icon.spawn(Node {
+                width: Val::Px(DRAFT_CARD_ICON_SIZE * 0.34),
+                height: Val::Px(DRAFT_CARD_ICON_SIZE * 0.34),
+                position_type: PositionType::Absolute,
+                left: Val::Px(DRAFT_CARD_ICON_SIZE * 0.14),
+                top: Val::Px(DRAFT_CARD_ICON_SIZE * 0.17),
+                border: UiRect::all(Val::Px(3.0)),
+                border_radius: BorderRadius::all(Val::Px(999.0)),
+                ..default()
+            })
+            .insert(BorderColor::all(Color::srgb(0.93, 0.88, 0.75)))
+            .insert(BackgroundColor(Color::NONE));
+            icon.spawn(Node {
+                width: Val::Px(DRAFT_CARD_ICON_SIZE * 0.34),
+                height: Val::Px(DRAFT_CARD_ICON_SIZE * 0.34),
+                position_type: PositionType::Absolute,
+                left: Val::Px(DRAFT_CARD_ICON_SIZE * 0.40),
+                top: Val::Px(DRAFT_CARD_ICON_SIZE * 0.17),
+                border: UiRect::all(Val::Px(3.0)),
+                border_radius: BorderRadius::all(Val::Px(999.0)),
+                ..default()
+            })
+            .insert(BorderColor::all(Color::srgb(0.93, 0.88, 0.75)))
+            .insert(BackgroundColor(Color::NONE));
+        });
 }
 
 #[derive(Resource, Default, Clone, Debug)]
@@ -721,6 +855,10 @@ impl SaveGameState {
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
+        .insert_resource(SpritePickingSettings {
+            picking_mode: SpritePickingMode::AlphaThreshold(WORLD_ENTITY_ALPHA_THRESHOLD),
+            ..default()
+        })
         .init_state::<AppState>()
         .add_plugins(MapPlugin)
         .init_resource::<WorldManager>()
@@ -806,6 +944,7 @@ fn main() {
                 handle_draft_debug_unlock_columns,
                 handle_draft_confirm_button_interaction,
                 update_draft_visuals,
+                update_draft_confirm_button_visuals,
             )
                 .run_if(in_state(AppState::DraftSetup)),
         )
@@ -820,6 +959,7 @@ fn main() {
                 animate_bloom_halo,
                 animate_world_click_halo,
                 pulse_bloom_halo_on_world_click,
+                handle_bloom_world_entity_click,
                 handle_exit_world_button_interaction,
                 handle_exit_to_main_menu_button_interaction,
                 handle_quit_game_button_interaction,
@@ -1197,7 +1337,11 @@ fn handle_new_game_button_interaction(
 fn update_main_menu_button_visuals(
     mut interaction_query: Query<
         (&Interaction, &MainMenuButtonSprites, &Children),
-        (Changed<Interaction>, With<Button>),
+        (
+            Changed<Interaction>,
+            With<Button>,
+            Without<DisabledMenuButton>,
+        ),
     >,
     mut image_query: Query<&mut ImageNode, With<MainMenuButtonImage>>,
 ) {
@@ -1974,6 +2118,30 @@ fn activate_world(
     Ok(())
 }
 
+fn pregenerate_world_if_needed(
+    root_dir: &Path,
+    slot_id: &str,
+    world: &WorldMetadata,
+) -> Result<(), String> {
+    let generation = world.generation.unwrap_or_default();
+    let world_dir = savegame::world_save_path(root_dir, slot_id, &world.id);
+
+    for chunk in pregenerate_world_chunks(generation) {
+        let chunk_path = world_dir.join("chunks").join(format!(
+            "chunk_{}_{}.bin",
+            chunk.position.x, chunk.position.y
+        ));
+        world::serialization::save_chunk(&chunk, &chunk_path).map_err(|err| {
+            format!(
+                "failed to save pregenerated chunk {:?}: {err}",
+                chunk.position
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 fn saved_actor(
     position: &Position,
     velocity: &Velocity,
@@ -2200,83 +2368,6 @@ fn cursor_over_blocking_ui(
     false
 }
 
-fn clicked_world_entity_screen_position(
-    world_pos: Vec2,
-    world_entities: &Query<
-        (
-            &Sprite,
-            Option<&Anchor>,
-            &Transform,
-            &Position,
-            &WorldRenderDepth,
-            Option<&Human>,
-            Option<&ForestGuardian>,
-            Option<&Snail>,
-            Option<&TreeSpirit>,
-            Option<&VariantTree>,
-        ),
-        (With<WorldRenderDepth>, Without<WorldClickHalo>),
-    >,
-    images: &Assets<Image>,
-    texture_atlas_layouts: &Assets<TextureAtlasLayout>,
-) -> Option<(Vec2, f32, f32)> {
-    let mut best_match: Option<(f32, f32, Vec2, f32)> = None;
-
-    for (
-        sprite,
-        anchor,
-        transform,
-        position,
-        render_depth,
-        human,
-        guardian,
-        snail,
-        tree_spirit,
-        variant_tree,
-    ) in world_entities.iter()
-    {
-        if human.is_none()
-            && guardian.is_none()
-            && snail.is_none()
-            && tree_spirit.is_none()
-            && variant_tree.is_none()
-        {
-            continue;
-        }
-
-        let Some((center, size)) = sprite_world_bounds(
-            sprite,
-            anchor.copied(),
-            transform,
-            images,
-            texture_atlas_layouts,
-        ) else {
-            continue;
-        };
-
-        let half_size = (size * 0.5) + Vec2::splat(WORLD_ENTITY_CLICK_PADDING);
-        let min = center - half_size;
-        let max = center + half_size;
-
-        if world_pos.x < min.x || world_pos.x > max.x || world_pos.y < min.y || world_pos.y > max.y
-        {
-            continue;
-        }
-
-        let score = world_pos.distance(center);
-        let render_z = render_depth.z_for_position(position);
-        let halo_diameter = size.max_element() + WORLD_CLICK_HALO_PADDING;
-
-        match best_match {
-            Some((best_z, best_score, _, _))
-                if render_z < best_z || (render_z == best_z && score >= best_score) => {}
-            _ => best_match = Some((render_z, score, center, halo_diameter)),
-        }
-    }
-
-    best_match.map(|(render_z, _, center, halo_diameter)| (center, render_z, halo_diameter))
-}
-
 fn setup_draft_setup(
     mut commands: Commands,
     assets: Option<Res<AssetServer>>,
@@ -2388,7 +2479,7 @@ fn setup_draft_setup(
                         ..default()
                     },
                     Text::new(
-                        "Drag cards into unlocked columns. Drag placed cards to move or remove them. Island Cards unlock the row below.",
+                        "First column is the world recipe: row 1 shape, row 2 element. Drag cards into unlocked columns. Island and Infinity cards unlock the row below.",
                     ),
                     TextFont {
                         font_size: 16.0,
@@ -2433,9 +2524,17 @@ fn setup_draft_setup(
                                             ))
                                             .with_children(|cell| {
                                                 let mut icon = ImageNode::default();
+                                                let mut icon_node = Node {
+                                                    width: Val::Px(DRAFT_CARD_ICON_SIZE),
+                                                    height: Val::Px(DRAFT_CARD_ICON_SIZE),
+                                                    ..default()
+                                                };
+                                                let mut infinity_node = Node::default();
                                                 if let Some(assets) = assets.as_deref() {
-                                                    set_draft_card_icon(
+                                                    apply_draft_card_icon(
                                                         &mut icon,
+                                                        &mut icon_node,
+                                                        &mut infinity_node,
                                                         DraftCard::Human,
                                                         Some(assets),
                                                         texture_atlas_layouts.as_deref_mut(),
@@ -2477,12 +2576,14 @@ fn setup_draft_setup(
                                                     frame.spawn((
                                                         DraftPlacedCardIcon,
                                                         icon,
-                                                        Node {
-                                                            width: Val::Px(DRAFT_CARD_ICON_SIZE),
-                                                            height: Val::Px(DRAFT_CARD_ICON_SIZE),
-                                                            ..default()
-                                                        },
+                                                        icon_node,
                                                     ));
+
+                                                    spawn_infinity_icon(
+                                                        frame,
+                                                        DraftPlacedCardInfinityIcon,
+                                                        false,
+                                                    );
 
                                                     frame.spawn((
                                                         DraftCardFrame,
@@ -2520,7 +2621,7 @@ fn setup_draft_setup(
                         ..default()
                     },))
                     .with_children(|tray| {
-                        for card in ALL_DRAFT_CARDS {
+                        for card in VISIBLE_DRAFT_CARDS {
                             let label = card.label();
                             let label_plate_height = label_plate_height(label);
                             tray.spawn((
@@ -2570,9 +2671,17 @@ fn setup_draft_setup(
                                         ));
 
                                         let mut icon = ImageNode::default();
+                                        let mut icon_node = Node {
+                                            width: Val::Px(DRAFT_CARD_ICON_SIZE),
+                                            height: Val::Px(DRAFT_CARD_ICON_SIZE),
+                                            ..default()
+                                        };
+                                        let mut infinity_node = Node::default();
                                         if let Some(assets) = assets.as_deref() {
-                                            set_draft_card_icon(
+                                            apply_draft_card_icon(
                                                 &mut icon,
+                                                &mut icon_node,
+                                                &mut infinity_node,
                                                 card,
                                                 Some(assets),
                                                 texture_atlas_layouts.as_deref_mut(),
@@ -2582,12 +2691,14 @@ fn setup_draft_setup(
                                         frame.spawn((
                                             DraftCardIcon,
                                             icon,
-                                            Node {
-                                                width: Val::Px(DRAFT_CARD_ICON_SIZE),
-                                                height: Val::Px(DRAFT_CARD_ICON_SIZE),
-                                                ..default()
-                                            },
+                                            icon_node,
                                         ));
+
+                                        spawn_infinity_icon(
+                                            frame,
+                                            DraftCardInfinityIcon,
+                                            card == DraftCard::Infinity,
+                                        );
 
                                         frame.spawn((
                                             DraftCardFrame,
@@ -2685,6 +2796,7 @@ fn setup_draft_setup(
                         ));
                         button.spawn((
                             Text::new("Confirm"),
+                            DraftConfirmButtonLabel,
                             TextFont {
                                 font_size: 28.0,
                                 ..default()
@@ -2733,23 +2845,25 @@ fn setup_draft_setup(
             ));
 
             let mut icon = ImageNode::default();
+            let mut icon_node = Node {
+                width: Val::Px(DRAFT_CARD_ICON_SIZE),
+                height: Val::Px(DRAFT_CARD_ICON_SIZE),
+                ..default()
+            };
+            let mut infinity_node = Node::default();
             if let Some(assets) = assets.as_deref() {
-                set_draft_card_icon(
+                apply_draft_card_icon(
                     &mut icon,
+                    &mut icon_node,
+                    &mut infinity_node,
                     DraftCard::Human,
                     Some(assets),
                     texture_atlas_layouts.as_deref_mut(),
                 );
             }
-            ghost.spawn((
-                DraftCardIcon,
-                icon,
-                Node {
-                    width: Val::Px(DRAFT_CARD_ICON_SIZE),
-                    height: Val::Px(DRAFT_CARD_ICON_SIZE),
-                    ..default()
-                },
-            ));
+            ghost.spawn((DraftCardIcon, icon, icon_node));
+
+            spawn_infinity_icon(ghost, DraftCardInfinityIcon, false);
 
             ghost.spawn((
                 DraftCardFrame,
@@ -2910,9 +3024,10 @@ fn update_draft_hovered_cell(
             .iter()
             .find_map(|(cell, computed_node, transform, node)| {
                 if node.display == Display::None
-                    || !draft_board.can_place_with_omission(
+                    || !draft_board.can_place_card_with_omission(
                         cell.column,
                         cell.row,
+                        draft_drag_state.active_card?,
                         draft_drag_state.source_cell,
                     )
                 {
@@ -2947,7 +3062,14 @@ fn handle_draft_card_drop(
                     row: index % DRAFT_MAX_ROWS,
                 };
 
-                if source != target {
+                if source != target
+                    && draft_board.can_place_card_with_omission(
+                        target.column,
+                        target.row,
+                        card,
+                        Some(source),
+                    )
+                {
                     draft_board.remove_card(source.column, source.row);
                     draft_board.place_card(target.column, target.row, card);
                 }
@@ -2958,7 +3080,9 @@ fn handle_draft_card_drop(
             (None, Some(index)) => {
                 let column = index / DRAFT_MAX_ROWS;
                 let row = index % DRAFT_MAX_ROWS;
-                draft_board.place_card(column, row, card);
+                if draft_board.can_place_card(column, row, card) {
+                    draft_board.place_card(column, row, card);
+                }
             }
             (None, None) => {}
         }
@@ -3006,12 +3130,24 @@ fn handle_draft_debug_unlock_columns(
 fn handle_draft_confirm_button_interaction(
     mut buttons: Query<
         (&Interaction, &mut DraftConfirmButtonPressState),
-        (Changed<Interaction>, With<DraftConfirmButton>),
+        (
+            Changed<Interaction>,
+            With<DraftConfirmButton>,
+            Without<DisabledMenuButton>,
+        ),
     >,
+    draft_board: Res<DraftBoard>,
     mut save_state: ResMut<SaveGameState>,
     mut world_manager: ResMut<WorldManager>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
+    if !draft_confirm_enabled(&draft_board) {
+        for (_, mut press_state) in &mut buttons {
+            press_state.armed = false;
+        }
+        return;
+    }
+
     for (interaction, mut press_state) in &mut buttons {
         match *interaction {
             Interaction::Pressed => {
@@ -3023,9 +3159,33 @@ fn handle_draft_confirm_button_interaction(
                     error!("Draft confirm missing target slot");
                     continue;
                 };
+                let Some(generation) = draft_generation_config(&draft_board) else {
+                    warn!(
+                        "Draft confirm requires a valid recipe in the first column: shape on row 1 and element on row 2"
+                    );
+                    continue;
+                };
 
-                match savegame::create_world(&save_state.root_dir, &slot_id) {
+                match savegame::create_world(&save_state.root_dir, &slot_id, generation) {
                     Ok(world) => {
+                        if let Err(err) =
+                            pregenerate_world_if_needed(&save_state.root_dir, &slot_id, &world)
+                        {
+                            error!(
+                                "Failed to pregenerate world {} for slot {}: {}",
+                                world.id, slot_id, err
+                            );
+                            let world_root =
+                                savegame::world_path(&save_state.root_dir, &slot_id, &world.id);
+                            if let Err(remove_err) = fs::remove_dir_all(&world_root) {
+                                error!(
+                                    "Failed to clean up partially created world {}: {}",
+                                    world.id, remove_err
+                                );
+                            }
+                            continue;
+                        }
+
                         if activate_world(&mut save_state, &mut world_manager, &slot_id, &world.id)
                             .is_ok()
                         {
@@ -3078,11 +3238,26 @@ fn update_draft_visuals(
     >,
     mut placed_cards: Query<(&Children, &mut Visibility), With<DraftPlacedCardVisual>>,
     mut placed_card_icons: Query<
-        &mut ImageNode,
+        (&mut ImageNode, &mut Node),
         (
             With<DraftPlacedCardIcon>,
             Without<DraftCardIcon>,
+            Without<DraftGridCell>,
+            Without<DraftGridColumn>,
+            Without<DraftPlacedCardInfinityIcon>,
             Without<DraftCardFrame>,
+            Without<DraftCardGhost>,
+        ),
+    >,
+    mut placed_card_infinity_icons: Query<
+        &mut Node,
+        (
+            With<DraftPlacedCardInfinityIcon>,
+            Without<DraftPlacedCardIcon>,
+            Without<DraftGridCell>,
+            Without<DraftGridColumn>,
+            Without<DraftCardFrame>,
+            Without<DraftCardGhost>,
         ),
     >,
     mut draft_card_frames: Query<
@@ -3090,19 +3265,167 @@ fn update_draft_visuals(
         (
             With<DraftCardFrame>,
             Without<DraftPlacedCardIcon>,
+            Without<DraftPlacedCardInfinityIcon>,
             Without<DraftCardIcon>,
+            Without<DraftCardInfinityIcon>,
+            Without<DraftGridCell>,
+            Without<DraftGridColumn>,
+            Without<DraftCardGhost>,
         ),
     >,
     mut ghost_query: Query<(&Children, &mut Node, &mut UiTransform), With<DraftCardGhost>>,
     mut ghost_icons: Query<
-        &mut ImageNode,
+        (&mut ImageNode, &mut Node),
         (
             With<DraftCardIcon>,
             Without<DraftPlacedCardIcon>,
+            Without<DraftPlacedCardInfinityIcon>,
+            Without<DraftCardInfinityIcon>,
             Without<DraftCardFrame>,
+            Without<DraftGridCell>,
+            Without<DraftGridColumn>,
+            Without<DraftCardGhost>,
+        ),
+    >,
+    mut ghost_infinity_icons: Query<
+        &mut Node,
+        (
+            With<DraftCardInfinityIcon>,
+            Without<DraftPlacedCardIcon>,
+            Without<DraftPlacedCardInfinityIcon>,
+            Without<DraftCardIcon>,
+            Without<DraftCardFrame>,
+            Without<DraftGridCell>,
+            Without<DraftGridColumn>,
+            Without<DraftCardGhost>,
         ),
     >,
 ) {
+    fn update_card_icon_children(
+        children: &Children,
+        card: DraftCard,
+        assets_ref: Option<&AssetServer>,
+        texture_atlas_layouts: Option<&mut Assets<TextureAtlasLayout>>,
+        image_query: &mut Query<
+            (&mut ImageNode, &mut Node),
+            (
+                With<DraftPlacedCardIcon>,
+                Without<DraftCardIcon>,
+                Without<DraftGridCell>,
+                Without<DraftGridColumn>,
+                Without<DraftPlacedCardInfinityIcon>,
+                Without<DraftCardFrame>,
+                Without<DraftCardGhost>,
+            ),
+        >,
+        infinity_query: &mut Query<
+            &mut Node,
+            (
+                With<DraftPlacedCardInfinityIcon>,
+                Without<DraftPlacedCardIcon>,
+                Without<DraftGridCell>,
+                Without<DraftGridColumn>,
+                Without<DraftCardFrame>,
+                Without<DraftCardGhost>,
+            ),
+        >,
+    ) {
+        let mut image_child = None;
+        let mut infinity_child = None;
+
+        for child in children.iter() {
+            if image_query.get_mut(child).is_ok() {
+                image_child = Some(child);
+            }
+            if infinity_query.get_mut(child).is_ok() {
+                infinity_child = Some(child);
+            }
+        }
+
+        let (Some(image_child), Some(infinity_child)) = (image_child, infinity_child) else {
+            return;
+        };
+        let Ok((mut image, mut image_node)) = image_query.get_mut(image_child) else {
+            return;
+        };
+        let Ok(mut infinity_node) = infinity_query.get_mut(infinity_child) else {
+            return;
+        };
+
+        apply_draft_card_icon(
+            &mut image,
+            &mut image_node,
+            &mut infinity_node,
+            card,
+            assets_ref,
+            texture_atlas_layouts,
+        );
+    }
+
+    fn update_ghost_icon_children(
+        children: &Children,
+        card: DraftCard,
+        assets_ref: Option<&AssetServer>,
+        texture_atlas_layouts: Option<&mut Assets<TextureAtlasLayout>>,
+        image_query: &mut Query<
+            (&mut ImageNode, &mut Node),
+            (
+                With<DraftCardIcon>,
+                Without<DraftPlacedCardIcon>,
+                Without<DraftPlacedCardInfinityIcon>,
+                Without<DraftCardInfinityIcon>,
+                Without<DraftCardFrame>,
+                Without<DraftGridCell>,
+                Without<DraftGridColumn>,
+                Without<DraftCardGhost>,
+            ),
+        >,
+        infinity_query: &mut Query<
+            &mut Node,
+            (
+                With<DraftCardInfinityIcon>,
+                Without<DraftPlacedCardIcon>,
+                Without<DraftPlacedCardInfinityIcon>,
+                Without<DraftCardIcon>,
+                Without<DraftCardFrame>,
+                Without<DraftGridCell>,
+                Without<DraftGridColumn>,
+                Without<DraftCardGhost>,
+            ),
+        >,
+    ) {
+        let mut image_child = None;
+        let mut infinity_child = None;
+
+        for child in children.iter() {
+            if image_query.get_mut(child).is_ok() {
+                image_child = Some(child);
+            }
+            if infinity_query.get_mut(child).is_ok() {
+                infinity_child = Some(child);
+            }
+        }
+
+        let (Some(image_child), Some(infinity_child)) = (image_child, infinity_child) else {
+            return;
+        };
+        let Ok((mut image, mut image_node)) = image_query.get_mut(image_child) else {
+            return;
+        };
+        let Ok(mut infinity_node) = infinity_query.get_mut(infinity_child) else {
+            return;
+        };
+
+        apply_draft_card_icon(
+            &mut image,
+            &mut image_node,
+            &mut infinity_node,
+            card,
+            assets_ref,
+            texture_atlas_layouts,
+        );
+    }
+
     let assets_ref = assets.as_deref();
     let draft_layout_scale = windows
         .single()
@@ -3163,15 +3486,15 @@ fn update_draft_visuals(
         for child in children {
             if let Ok((placed_card_children, mut visibility)) = placed_cards.get_mut(*child) {
                 if let Some(card) = occupied {
+                    update_card_icon_children(
+                        placed_card_children,
+                        card,
+                        assets_ref,
+                        texture_atlas_layouts.as_deref_mut(),
+                        &mut placed_card_icons,
+                        &mut placed_card_infinity_icons,
+                    );
                     for placed_card_child in placed_card_children {
-                        if let Ok(mut image) = placed_card_icons.get_mut(*placed_card_child) {
-                            set_draft_card_icon(
-                                &mut image,
-                                card,
-                                assets_ref,
-                                texture_atlas_layouts.as_deref_mut(),
-                            );
-                        }
                         if let Ok(mut image) = draft_card_frames.get_mut(*placed_card_child) {
                             if let Some(texture_atlas) = image.texture_atlas.as_mut() {
                                 texture_atlas.index = card.frame_index();
@@ -3201,24 +3524,81 @@ fn update_draft_visuals(
             ghost_node.top = Val::Px(logical_cursor.y - (DRAFT_GRID_CARD_HEIGHT * 0.5));
 
             for child in children {
-                if let Ok(mut image) = ghost_icons.get_mut(*child) {
-                    set_draft_card_icon(
-                        &mut image,
-                        card,
-                        assets_ref,
-                        texture_atlas_layouts.as_deref_mut(),
-                    );
-                }
                 if let Ok(mut image) = draft_card_frames.get_mut(*child) {
                     if let Some(texture_atlas) = image.texture_atlas.as_mut() {
                         texture_atlas.index = card.frame_index();
                     }
                 }
             }
+            update_ghost_icon_children(
+                children,
+                card,
+                assets_ref,
+                texture_atlas_layouts.as_deref_mut(),
+                &mut ghost_icons,
+                &mut ghost_infinity_icons,
+            );
         } else {
             ghost_node.display = Display::None;
             ghost_node.left = Val::Px(-500.0);
             ghost_node.top = Val::Px(-500.0);
+        }
+    }
+}
+
+fn update_draft_confirm_button_visuals(
+    draft_board: Res<DraftBoard>,
+    mut confirm_buttons: Query<
+        (
+            Entity,
+            &Interaction,
+            &Children,
+            &mut DraftConfirmButtonPressState,
+            Option<&DisabledMenuButton>,
+        ),
+        With<DraftConfirmButton>,
+    >,
+    mut confirm_button_images: Query<&mut ImageNode, With<MainMenuButtonImage>>,
+    mut confirm_text: Query<&mut TextColor, With<DraftConfirmButtonLabel>>,
+    mut commands: Commands,
+) {
+    let confirm_enabled = draft_confirm_enabled(&draft_board);
+
+    if let Ok((entity, interaction, children, mut press_state, disabled_marker)) =
+        confirm_buttons.single_mut()
+    {
+        if confirm_enabled {
+            if disabled_marker.is_some() {
+                commands.entity(entity).remove::<DisabledMenuButton>();
+            }
+        } else {
+            if disabled_marker.is_none() {
+                commands.entity(entity).insert(DisabledMenuButton);
+            }
+            press_state.armed = false;
+        }
+
+        let button_rect = if confirm_enabled {
+            Some(match *interaction {
+                Interaction::Pressed => main_menu_button_clicked_rect(),
+                Interaction::Hovered => main_menu_button_hovered_rect(),
+                Interaction::None => main_menu_button_standard_rect(),
+            })
+        } else {
+            Some(main_menu_button_standard_rect())
+        };
+
+        for child in children.iter() {
+            if let Ok(mut image) = confirm_button_images.get_mut(child) {
+                image.rect = button_rect;
+            }
+            if let Ok(mut text_color) = confirm_text.get_mut(child) {
+                text_color.0 = if confirm_enabled {
+                    Color::srgb(0.19, 0.12, 0.06)
+                } else {
+                    Color::srgb(0.42, 0.39, 0.35)
+                };
+            }
         }
     }
 }
@@ -3246,10 +3626,17 @@ fn setup_world(
 
     let (saved_camera, saved_bloom) =
         match savegame::load_world_metadata_for_world_dir(&world_manager.save_directory) {
-            Ok(Some(metadata)) => (metadata.camera, metadata.bloom),
-            Ok(None) => (None, None),
+            Ok(Some(metadata)) => {
+                world_manager.generation = metadata.generation.unwrap_or_default();
+                (metadata.camera, metadata.bloom)
+            }
+            Ok(None) => {
+                world_manager.generation = WorldGenerationConfig::default();
+                (None, None)
+            }
             Err(err) => {
                 warn!("Failed to load world metadata: {err}");
+                world_manager.generation = WorldGenerationConfig::default();
                 (None, None)
             }
         };
@@ -3352,8 +3739,13 @@ fn setup_world(
 fn zoom_camera(
     mut scroll_events: MessageReader<MouseWheel>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    map_state: Res<MapState>,
     mut camera_query: Query<&mut Projection, With<Camera2d>>,
 ) {
+    if map_state.visible {
+        return;
+    }
+
     if let Ok(mut projection) = camera_query.single_mut() {
         let mut zoom_delta = 0.0;
 
@@ -3981,8 +4373,16 @@ fn setup_ui(
 fn toggle_escape_menu(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut escape_menu_state: ResMut<EscapeMenuState>,
+    mut map_state: ResMut<MapState>,
+    mut map_modal_visibility: Single<&mut Visibility, With<MapModal>>,
 ) {
     if keyboard.just_pressed(KeyCode::Escape) {
+        if map_state.visible {
+            map_state.visible = false;
+            **map_modal_visibility = Visibility::Hidden;
+            return;
+        }
+
         escape_menu_state.open = !escape_menu_state.open;
     }
 }
@@ -4086,38 +4486,17 @@ fn pulse_bloom_halo_on_world_click(
     bloom_selection: Res<BloomSelection>,
     mouse_button: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
-    images: Res<Assets<Image>>,
-    texture_atlas_layouts: Res<Assets<TextureAtlasLayout>>,
-    world_entities: Query<
-        (
-            &Sprite,
-            Option<&Anchor>,
-            &Transform,
-            &Position,
-            &WorldRenderDepth,
-            Option<&Human>,
-            Option<&ForestGuardian>,
-            Option<&Snail>,
-            Option<&TreeSpirit>,
-            Option<&VariantTree>,
-        ),
-        (With<WorldRenderDepth>, Without<WorldClickHalo>),
-    >,
     mut halo_query: Query<&mut BloomHaloPulse, With<BloomPoolHalo>>,
-    mut ui_param_set: ParamSet<(
-        Query<
-            (
-                &ComputedNode,
-                &UiGlobalTransform,
-                &Node,
-                Option<&Visibility>,
-                Option<&InheritedVisibility>,
-            ),
-            With<Node>,
-        >,
-        Query<(&mut WorldClickHaloPulse, &mut Transform, &mut Visibility), With<WorldClickHalo>>,
-    )>,
+    ui_nodes: Query<
+        (
+            &ComputedNode,
+            &UiGlobalTransform,
+            &Node,
+            Option<&Visibility>,
+            Option<&InheritedVisibility>,
+        ),
+        With<Node>,
+    >,
 ) {
     if !bloom_selection.selected || !mouse_button.just_pressed(MouseButton::Left) {
         return;
@@ -4131,13 +4510,9 @@ fn pulse_bloom_halo_on_world_click(
         return;
     };
 
-    if cursor_over_blocking_ui(ui_cursor, &ui_param_set.p0()) {
+    if cursor_over_blocking_ui(ui_cursor, &ui_nodes) {
         return;
     }
-
-    let Some(cursor) = window.cursor_position() else {
-        return;
-    };
 
     let Ok(mut pulse) = halo_query.single_mut() else {
         return;
@@ -4145,41 +4520,74 @@ fn pulse_bloom_halo_on_world_click(
 
     pulse.timer.reset();
     pulse.timer.unpause();
+}
 
-    let Ok((camera, camera_transform)) = camera_query.single() else {
+fn handle_bloom_world_entity_click(
+    bloom_selection: Res<BloomSelection>,
+    mut pointer_clicks: MessageReader<Pointer<Click>>,
+    images: Res<Assets<Image>>,
+    texture_atlas_layouts: Res<Assets<TextureAtlasLayout>>,
+    world_entities: Query<
+        (
+            &Sprite,
+            Option<&Anchor>,
+            &GlobalTransform,
+            &Position,
+            &WorldRenderDepth,
+            &WorldClickableEntity,
+        ),
+        Without<WorldClickHalo>,
+    >,
+    mut world_halo_query: Query<
+        (&mut WorldClickHaloPulse, &mut Transform, &mut Visibility),
+        With<WorldClickHalo>,
+    >,
+) {
+    if !bloom_selection.selected {
         return;
-    };
+    }
 
-    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor) else {
-        return;
-    };
+    for click in pointer_clicks.read() {
+        if click.button != PointerButton::Primary {
+            continue;
+        }
 
-    let Some((world_center, render_z, halo_diameter)) = clicked_world_entity_screen_position(
-        world_pos,
-        &world_entities,
-        &images,
-        &texture_atlas_layouts,
-    ) else {
-        return;
-    };
+        let Ok((sprite, anchor, transform, position, render_depth, _)) =
+            world_entities.get(click.entity)
+        else {
+            continue;
+        };
 
-    let mut world_halo_query = ui_param_set.p1();
-    let Ok((mut world_pulse, mut world_halo_transform, mut visibility)) =
-        world_halo_query.single_mut()
-    else {
-        return;
-    };
+        let Some((world_center, size)) = sprite_world_bounds(
+            sprite,
+            anchor.copied(),
+            &transform.compute_transform(),
+            &images,
+            &texture_atlas_layouts,
+        ) else {
+            continue;
+        };
 
-    world_halo_transform.translation = Vec3::new(
-        world_center.x,
-        world_center.y,
-        render_z - WORLD_CLICK_HALO_DEPTH_OFFSET,
-    );
-    world_halo_transform.scale = Vec3::splat(halo_diameter);
-    *visibility = Visibility::Visible;
-    world_pulse.base_diameter = halo_diameter;
-    world_pulse.timer.reset();
-    world_pulse.timer.unpause();
+        let render_z = render_depth.z_for_position(position);
+        let halo_diameter = size.max_element() + WORLD_CLICK_HALO_PADDING;
+
+        let Ok((mut world_pulse, mut world_halo_transform, mut visibility)) =
+            world_halo_query.single_mut()
+        else {
+            return;
+        };
+
+        world_halo_transform.translation = Vec3::new(
+            world_center.x,
+            world_center.y,
+            render_z - WORLD_CLICK_HALO_DEPTH_OFFSET,
+        );
+        world_halo_transform.scale = Vec3::splat(halo_diameter);
+        *visibility = Visibility::Visible;
+        world_pulse.base_diameter = halo_diameter;
+        world_pulse.timer.reset();
+        world_pulse.timer.unpause();
+    }
 }
 
 fn animate_bloom_halo(
@@ -4528,6 +4936,7 @@ fn handle_entity_placement(
         With<Node>,
     >,
     mut bloom: ResMut<Bloom>,
+    mut world_manager: ResMut<WorldManager>,
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
@@ -4574,6 +4983,14 @@ fn handle_entity_placement(
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else {
         return;
     };
+
+    if !world_manager.has_land_at_world(world_pos) {
+        info!(
+            "Blocked entity placement on void at ({}, {})",
+            world_pos.x, world_pos.y
+        );
+        return;
+    }
 
     // Spawn the entity at the world position
     let position = Position::new(world_pos.x, world_pos.y);
@@ -4671,6 +5088,11 @@ fn handle_terrain_painting(
 
     let tile_pos = world_to_tile_pos(world_pos);
     if paint_drag_state.last_painted_tile == Some(tile_pos) {
+        return;
+    }
+
+    if !world_manager.has_land_at_world(world_pos) {
+        paint_drag_state.reset();
         return;
     }
 
@@ -4842,6 +5264,11 @@ mod tests {
             .set(AppState::DraftSetup);
         app.update();
         app.update();
+        {
+            let mut draft_board = app.world_mut().resource_mut::<DraftBoard>();
+            assert!(draft_board.place_card(0, 0, DraftCard::Island));
+            assert!(draft_board.place_card(0, 1, DraftCard::Grass));
+        }
 
         let confirm_button = {
             let world = app.world_mut();
@@ -4882,7 +5309,8 @@ mod tests {
             .add_systems(OnEnter(AppState::DraftSetup), setup_draft_setup)
             .add_systems(
                 Update,
-                update_draft_visuals.run_if(in_state(AppState::DraftSetup)),
+                (update_draft_visuals, update_draft_confirm_button_visuals)
+                    .run_if(in_state(AppState::DraftSetup)),
             );
 
         app.world_mut()
@@ -4911,6 +5339,35 @@ mod tests {
     }
 
     #[test]
+    fn draft_tray_only_shows_shape_and_element_cards() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<AppState>()
+            .init_resource::<DraftBoard>()
+            .init_resource::<DraftDragState>()
+            .init_resource::<SaveGameState>()
+            .add_systems(OnEnter(AppState::DraftSetup), setup_draft_setup);
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::DraftSetup);
+        app.update();
+        app.update();
+
+        let tray_cards = {
+            let world = app.world_mut();
+            world
+                .query::<&DraftCardTypeComponent>()
+                .iter(world)
+                .map(|card| card.0)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(tray_cards, VISIBLE_DRAFT_CARDS);
+    }
+
+    #[test]
     fn island_card_unlocks_next_row_only_in_same_column() {
         let mut board = DraftBoard::default();
 
@@ -4919,10 +5376,6 @@ mod tests {
 
         assert!(board.place_card(0, 0, DraftCard::Island));
         assert!(board.is_row_unlocked(0, 1));
-
-        let mut non_unlocking_board = DraftBoard::default();
-        assert!(non_unlocking_board.place_card(0, 0, DraftCard::Human));
-        assert!(!non_unlocking_board.is_row_unlocked(0, 1));
     }
 
     #[test]
@@ -4930,10 +5383,13 @@ mod tests {
         let mut board = DraftBoard::default();
 
         assert!(board.place_card(0, 0, DraftCard::Island));
-        assert!(board.place_card(0, 1, DraftCard::Human));
-        assert_eq!(board.card_at(0, 1), Some(DraftCard::Human));
+        assert!(board.place_card(0, 1, DraftCard::Grass));
+        assert_eq!(board.card_at(0, 1), Some(DraftCard::Grass));
 
-        assert!(board.place_card(0, 0, DraftCard::Grass));
+        assert!(board.place_card(0, 0, DraftCard::Infinity));
+        assert_eq!(board.card_at(0, 1), Some(DraftCard::Grass));
+
+        assert!(board.remove_card(0, 0).is_some());
         assert!(!board.is_row_unlocked(0, 1));
         assert_eq!(board.card_at(0, 1), None);
 
@@ -4947,7 +5403,7 @@ mod tests {
         let mut board = DraftBoard::default();
 
         assert!(board.place_card(0, 0, DraftCard::Island));
-        assert!(board.place_card(0, 1, DraftCard::Human));
+        assert!(board.place_card(0, 1, DraftCard::Grass));
 
         assert_eq!(board.remove_card(0, 0), Some(DraftCard::Island));
         assert_eq!(board.card_at(0, 0), None);
@@ -4961,11 +5417,102 @@ mod tests {
         board.reset(2);
 
         assert!(board.place_card(0, 0, DraftCard::Island));
-        assert!(board.place_card(0, 1, DraftCard::Human));
+        assert!(board.place_card(0, 1, DraftCard::Grass));
 
         let source = Some(DraftCellPosition { column: 0, row: 0 });
-        assert!(!board.can_place_with_omission(0, 1, source));
-        assert!(board.can_place_with_omission(1, 0, source));
+        assert!(!board.can_place_card_with_omission(0, 1, DraftCard::Grass, source));
+        assert!(board.can_place_card_with_omission(1, 0, DraftCard::Infinity, source));
+    }
+
+    #[test]
+    fn draft_generation_config_uses_first_column_shape_and_element() {
+        let mut board = DraftBoard::default();
+
+        assert!(board.place_card(0, 0, DraftCard::Infinity));
+        assert!(board.place_card(0, 1, DraftCard::Dirt));
+
+        assert_eq!(
+            draft_generation_config(&board),
+            Some(WorldGenerationConfig {
+                shape: WorldShape::Infinity,
+                element: WorldElement::Dirt,
+                ..WorldGenerationConfig::default()
+            })
+        );
+    }
+
+    #[test]
+    fn draft_generation_config_rejects_invalid_recipe_order() {
+        let mut board = DraftBoard::default();
+
+        board.cells[0][0] = Some(DraftCard::Grass);
+
+        assert_eq!(draft_generation_config(&board), None);
+    }
+
+    #[test]
+    fn draft_board_rejects_wrong_card_category_for_recipe_rows() {
+        let mut board = DraftBoard::default();
+
+        assert!(!board.place_card(0, 0, DraftCard::Grass));
+        assert!(board.place_card(0, 0, DraftCard::Island));
+        assert!(!board.place_card(0, 1, DraftCard::Infinity));
+        assert!(board.place_card(0, 1, DraftCard::Grass));
+    }
+
+    #[test]
+    fn invalid_draft_confirm_does_not_transition_to_gameplay() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<AppState>()
+            .init_resource::<DraftBoard>()
+            .init_resource::<DraftDragState>()
+            .init_resource::<SaveGameState>()
+            .init_resource::<WorldManager>()
+            .add_systems(OnEnter(AppState::DraftSetup), setup_draft_setup)
+            .add_systems(OnExit(AppState::DraftSetup), cleanup_draft_setup)
+            .add_systems(Update, handle_draft_confirm_button_interaction);
+        let temp_root = std::env::temp_dir().join("worldseed-test-invalid-confirm-draft");
+        let _ = fs::remove_dir_all(&temp_root);
+        let slot = savegame::create_slot(&temp_root).expect("slot should exist for draft confirm");
+        {
+            let mut save_state = app.world_mut().resource_mut::<SaveGameState>();
+            save_state.root_dir = temp_root.clone();
+            save_state.draft_target_slot_id = Some(slot.id);
+        }
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::DraftSetup);
+        app.update();
+        app.update();
+
+        let confirm_button = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<Entity, With<DraftConfirmButton>>()
+                .single(world)
+                .expect("expected confirm button to exist")
+        };
+
+        app.world_mut()
+            .entity_mut(confirm_button)
+            .insert(Interaction::Pressed);
+        app.update();
+
+        app.world_mut()
+            .entity_mut(confirm_button)
+            .insert(Interaction::Hovered);
+        app.update();
+        app.update();
+
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::DraftSetup
+        );
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]
@@ -5019,7 +5566,9 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<EscapeMenuState>()
+            .init_resource::<MapState>()
             .add_systems(Update, toggle_escape_menu);
+        app.world_mut().spawn((MapModal, Visibility::Hidden));
 
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
@@ -5027,6 +5576,37 @@ mod tests {
         app.update();
 
         assert!(app.world().resource::<EscapeMenuState>().open);
+    }
+
+    #[test]
+    fn escape_key_closes_minimap_without_opening_escape_menu() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<EscapeMenuState>()
+            .init_resource::<MapState>()
+            .add_systems(Update, toggle_escape_menu);
+
+        app.world_mut().spawn((MapModal, Visibility::Visible));
+        app.world_mut().resource_mut::<MapState>().visible = true;
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+
+        assert!(!app.world().resource::<MapState>().visible);
+        assert!(!app.world().resource::<EscapeMenuState>().open);
+
+        let visibility = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<&Visibility, With<MapModal>>()
+                .single(world)
+                .expect("expected map modal to exist")
+                .clone()
+        };
+        assert_eq!(visibility, Visibility::Hidden);
     }
 
     #[test]
@@ -5052,8 +5632,9 @@ mod tests {
             save_state.active_slot_id = Some("slot-1".to_string());
             save_state.active_world_id = Some("world-1".to_string());
         }
-        app.world_mut().resource_mut::<WorldManager>().save_directory =
-            temp_root.join("world");
+        app.world_mut()
+            .resource_mut::<WorldManager>()
+            .save_directory = temp_root.join("world");
         app.world_mut().resource_mut::<EscapeMenuState>().open = true;
         app.world_mut().spawn((InGameCamera, Camera2d));
         app.world_mut().spawn(InGameUiRoot);
@@ -5205,8 +5786,13 @@ fn cleanup_in_game(
         ResMut<EscapeMenuState>,
     ),
 ) {
-    let (mut placement_mode, mut paint_mode, mut paint_drag_state, mut save_notification, mut escape_menu_state) =
-        ui_state;
+    let (
+        mut placement_mode,
+        mut paint_mode,
+        mut paint_drag_state,
+        mut save_notification,
+        mut escape_menu_state,
+    ) = ui_state;
 
     if let Some((_, transform, projection)) = in_game_cameras.iter().next() {
         save_world_camera(
@@ -5256,6 +5842,7 @@ fn cleanup_in_game(
     world_manager.chunk_cache.clear();
     world_manager.pending_tile_modifications.clear();
     world_manager.camera_chunk = None;
+    world_manager.generation = WorldGenerationConfig::default();
 
     placement_mode.deselect();
     paint_mode.deselect();
@@ -5744,6 +6331,7 @@ fn reset_world_map(
     world_manager.chunk_cache.clear();
     world_manager.pending_tile_modifications.clear();
     world_manager.camera_chunk = None;
+    world_manager.generation = WorldGenerationConfig::default();
 
     // 3. Delete the active world directory from disk
     let save_dir = &world_manager.save_directory;

@@ -138,6 +138,10 @@ impl Health {
 #[derive(Component)]
 pub struct Human;
 
+/// Marker for world sprites that should receive alpha-aware sprite picking clicks.
+#[derive(Component)]
+pub struct WorldClickableEntity;
+
 /// Marker component for forest guardian creatures
 #[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ForestGuardian {

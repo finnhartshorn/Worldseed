@@ -4,13 +4,11 @@ const DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX: usize = 0;
 const DRAFT_CARD_FRAME_BRONZE_RED_INDEX: usize = 1;
 const DRAFT_ISLAND_TEXTURE_PATH: &str = "ui/New_Hills_forgotten_plains.png";
 
-pub const ALL_DRAFT_CARDS: [DraftCard; 6] = [
-    DraftCard::Human,
-    DraftCard::Guardian,
-    DraftCard::Snail,
+pub const VISIBLE_DRAFT_CARDS: [DraftCard; 4] = [
     DraftCard::Grass,
     DraftCard::Dirt,
     DraftCard::Island,
+    DraftCard::Infinity,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,11 +19,27 @@ pub enum DraftCard {
     Grass,
     Dirt,
     Island,
+    Infinity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DraftCardCategory {
+    Entity,
+    Element,
+    Shape,
 }
 
 impl DraftCard {
+    pub fn category(self) -> DraftCardCategory {
+        match self {
+            DraftCard::Human | DraftCard::Guardian | DraftCard::Snail => DraftCardCategory::Entity,
+            DraftCard::Grass | DraftCard::Dirt => DraftCardCategory::Element,
+            DraftCard::Island | DraftCard::Infinity => DraftCardCategory::Shape,
+        }
+    }
+
     pub fn unlocks_next_row(self) -> bool {
-        matches!(self, Self::Island)
+        matches!(self, Self::Island | Self::Infinity)
     }
 
     pub fn frame_index(self) -> usize {
@@ -44,6 +58,7 @@ impl DraftCard {
             DraftCard::Grass => "Grass",
             DraftCard::Dirt => "Dirt",
             DraftCard::Island => "Island Card",
+            DraftCard::Infinity => "Infinity Card",
         }
     }
 }
@@ -142,6 +157,11 @@ pub fn set_icon(
         DraftCard::Island => {
             image_node.image = assets.load(DRAFT_ISLAND_TEXTURE_PATH);
             image_node.rect = Some(Rect::new(16.0, 8.0, 40.0, 32.0));
+            image_node.texture_atlas = None;
+        }
+        DraftCard::Infinity => {
+            image_node.image = Handle::default();
+            image_node.rect = None;
             image_node.texture_atlas = None;
         }
     }

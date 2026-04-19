@@ -20,7 +20,13 @@ impl Plugin for MapPlugin {
             .add_systems(OnExit(AppState::InGame), cleanup_map_ui)
             .add_systems(
                 Update,
-                (toggle_map_visibility, update_map_display).run_if(in_state(AppState::InGame)),
+                (
+                    toggle_map_visibility,
+                    cycle_map_resolution,
+                    update_map_display,
+                )
+                    .chain()
+                    .run_if(in_state(AppState::InGame)),
             );
     }
 }
@@ -28,22 +34,42 @@ impl Plugin for MapPlugin {
 /// Configuration for map display
 #[derive(Resource)]
 pub struct MapConfig {
-    /// How many game world chunks are represented by one map tile
-    pub chunks_per_map_tile: u32,
+    /// Supported sample kernel widths in world tiles for one minimap pixel.
+    pub sample_sizes_in_tiles: Vec<u32>,
 }
 
 impl Default for MapConfig {
     fn default() -> Self {
         Self {
-            chunks_per_map_tile: 4, // Default: 4 chunks = 1 map tile
+            sample_sizes_in_tiles: vec![1, 2, 3, 4],
         }
     }
 }
 
-/// Current state of the map modal
-#[derive(Resource, Default)]
+/// Current state of the map modal.
+#[derive(Resource)]
 pub struct MapState {
     pub visible: bool,
+    pub active_sample_size_index: usize,
+}
+
+impl Default for MapState {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            active_sample_size_index: 1,
+        }
+    }
+}
+
+impl MapState {
+    pub fn active_sample_size(&self, config: &MapConfig) -> u32 {
+        config
+            .sample_sizes_in_tiles
+            .get(self.active_sample_size_index)
+            .copied()
+            .unwrap_or(1)
+    }
 }
 
 /// Marker component for the map modal root
@@ -53,3 +79,7 @@ pub struct MapModal;
 /// Marker component for the map content container
 #[derive(Component)]
 pub struct MapContent;
+
+/// Marker component for the dynamic minimap contents that are rebuilt on refresh.
+#[derive(Component)]
+pub struct MapDynamicContent;

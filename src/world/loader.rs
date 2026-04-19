@@ -1,4 +1,4 @@
-use super::{generator, manager::WorldManager, serialization};
+use super::{manager::WorldManager, savegame::WorldShape, serialization};
 use crate::tiles::{
     chunk::coords, Chunk, ChunkData, ChunkPos, DirtyChunk, CHUNK_LOAD_RADIUS, TILE_DISPLAY_SIZE,
 };
@@ -49,36 +49,11 @@ pub fn update_camera_chunk(
 ///
 /// Returns a reference to the cached ChunkData.
 fn load_chunk_data_only(world: &mut WorldManager, chunk_pos: ChunkPos) -> ChunkData {
-    // Check if already in cache
-    if let Some(cached) = world.get_cached_chunk(&chunk_pos) {
-        return cached.clone();
-    }
-
-    // Try to load from disk
-    let chunk_path = world.get_chunk_path(&chunk_pos);
-    let chunk_data = if serialization::chunk_exists(&chunk_path) {
-        match serialization::load_chunk(&chunk_path) {
-            Ok(data) => {
-                info!("Loaded chunk {:?} from disk (data only)", chunk_pos);
-                data
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to load chunk {:?}: {}, generating new",
-                    chunk_pos, e
-                );
-                generator::generate_chunk(chunk_pos)
-            }
-        }
-    } else {
-        // Generate new chunk
-        info!("Generating new chunk {:?} (data only)", chunk_pos);
-        generator::generate_chunk(chunk_pos)
-    };
-
-    // Cache the data
-    world.cache_chunk(chunk_data.clone());
-    chunk_data
+    world.ensure_chunk_cached(chunk_pos);
+    world
+        .get_cached_chunk(&chunk_pos)
+        .expect("chunk should exist in cache after ensure_chunk_cached")
+        .clone()
 }
 
 /// System to load chunks around the camera
@@ -307,9 +282,17 @@ pub fn apply_tile_modifications(mut world: ResMut<WorldManager>, mut commands: C
     }
 
     for modification in modifications {
+        let world_pos = Vec2::new(modification.world_x, modification.world_y);
+        if !world.has_land_at_world(world_pos) {
+            debug!(
+                "Ignoring tile modification on void at ({}, {})",
+                modification.world_x, modification.world_y
+            );
+            continue;
+        }
+
         // Convert world position to chunk position
-        let chunk_pos =
-            coords::world_to_chunk(Vec2::new(modification.world_x, modification.world_y));
+        let chunk_pos = coords::world_to_chunk(world_pos);
 
         // Ensure chunk data is in cache (load from disk/generate if needed)
         // Modifications work on any chunk, regardless of render state
@@ -328,7 +311,7 @@ pub fn apply_tile_modifications(mut world: ResMut<WorldManager>, mut commands: C
             .expect("Chunk data should be in cache after load_chunk_data_only");
 
         let (local_x, local_y) =
-            coords::world_to_local_tile(Vec2::new(modification.world_x, modification.world_y));
+            coords::world_to_local_tile(world_pos);
 
         if chunk_data.set_tile(modification.layer, local_x, local_y, modification.tile_id) {
             // Mark chunk as dirty for later persistence
@@ -600,5 +583,59 @@ pub fn update_tilemap(
                 tile_data[index] = Some(TileData::from_tileset_index(rng.random_range(0..2)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tiles::{LAYER_GROUND, TILE_EMPTY, TILE_GRASS};
+    use crate::world::savegame::{WorldElement, WorldGenerationConfig};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_world_dir() -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("worldseed-loader-{unique}"));
+        let _ = fs::remove_dir_all(&path);
+        path
+    }
+
+    #[test]
+    fn missing_island_chunks_load_as_empty() {
+        let root = temp_world_dir();
+        let mut world = WorldManager::new(root.clone());
+        world.generation = WorldGenerationConfig {
+            shape: WorldShape::Island,
+            element: WorldElement::Grass,
+            power: 1,
+            seed: 77,
+        };
+
+        let chunk = load_chunk_data_only(&mut world, ChunkPos::new(0, 0));
+        assert_eq!(chunk.get_tile(LAYER_GROUND, 0, 0), Some(TILE_EMPTY));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_infinite_chunks_still_generate() {
+        let root = temp_world_dir();
+        let mut world = WorldManager::new(root.clone());
+        world.generation = WorldGenerationConfig {
+            shape: WorldShape::Infinity,
+            element: WorldElement::Grass,
+            ..WorldGenerationConfig::default()
+        };
+
+        let chunk = load_chunk_data_only(&mut world, ChunkPos::new(0, 0));
+        assert_eq!(chunk.get_tile(LAYER_GROUND, 0, 0), Some(TILE_GRASS));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

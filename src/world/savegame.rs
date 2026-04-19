@@ -61,12 +61,62 @@ pub struct CameraState {
     pub zoom: f32,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldShape {
+    Island,
+    Infinity,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldElement {
+    Grass,
+    Dirt,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorldGenerationConfig {
+    pub shape: WorldShape,
+    pub element: WorldElement,
+    #[serde(default = "default_world_generation_power")]
+    pub power: u8,
+    #[serde(default = "default_world_generation_seed")]
+    pub seed: u64,
+}
+
+impl Default for WorldGenerationConfig {
+    fn default() -> Self {
+        Self {
+            shape: WorldShape::Infinity,
+            element: WorldElement::Grass,
+            power: default_world_generation_power(),
+            seed: default_world_generation_seed(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct LegacyWorldMetadata {
     id: String,
     display_name: String,
     created_at: u64,
     last_played_at: u64,
+}
+
+#[derive(Deserialize)]
+struct LegacyWorldGenerationConfig {
+    shape: WorldShape,
+    element: WorldElement,
+}
+
+#[derive(Deserialize)]
+struct LegacyWorldMetadataWithGeneration {
+    id: String,
+    display_name: String,
+    created_at: u64,
+    last_played_at: u64,
+    camera: Option<CameraState>,
+    bloom: Option<u16>,
+    generation: Option<LegacyWorldGenerationConfig>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -79,6 +129,8 @@ pub struct WorldMetadata {
     pub camera: Option<CameraState>,
     #[serde(default)]
     pub bloom: Option<u16>,
+    #[serde(default)]
+    pub generation: Option<WorldGenerationConfig>,
 }
 
 pub fn list_slots<P: AsRef<Path>>(root: P) -> Result<Vec<SaveSlotMetadata>, SaveGameError> {
@@ -166,6 +218,7 @@ pub fn create_slot<P: AsRef<Path>>(root: P) -> Result<SaveSlotMetadata, SaveGame
 pub fn create_world<P: AsRef<Path>>(
     root: P,
     slot_id: &str,
+    generation: WorldGenerationConfig,
 ) -> Result<WorldMetadata, SaveGameError> {
     let root = root.as_ref();
     let worlds = list_worlds(root, slot_id)?;
@@ -173,6 +226,11 @@ pub fn create_world<P: AsRef<Path>>(
     fs::create_dir_all(&worlds_root)?;
 
     let world_id = unique_id("world", &worlds_root)?;
+    let generation = WorldGenerationConfig {
+        power: generation.power.max(1),
+        seed: world_generation_seed_from_id(&world_id),
+        ..generation
+    };
     let now = unix_timestamp_secs();
     let metadata = WorldMetadata {
         id: world_id.clone(),
@@ -181,6 +239,7 @@ pub fn create_world<P: AsRef<Path>>(
         last_played_at: now,
         camera: None,
         bloom: None,
+        generation: Some(generation),
     };
 
     let world_path = worlds_root.join(&world_id);
@@ -311,6 +370,23 @@ fn default_available_columns() -> u8 {
     1
 }
 
+fn default_world_generation_power() -> u8 {
+    1
+}
+
+fn default_world_generation_seed() -> u64 {
+    0
+}
+
+fn world_generation_seed_from_id(world_id: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in world_id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 fn unix_timestamp_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -358,6 +434,22 @@ fn read_world_metadata<P: AsRef<Path>>(path: P) -> Result<WorldMetadata, SaveGam
     match bincode::deserialize(&bytes) {
         Ok(metadata) => Ok(metadata),
         Err(_) => {
+            if let Ok(legacy) = bincode::deserialize::<LegacyWorldMetadataWithGeneration>(&bytes) {
+                return Ok(WorldMetadata {
+                    id: legacy.id,
+                    display_name: legacy.display_name,
+                    created_at: legacy.created_at,
+                    last_played_at: legacy.last_played_at,
+                    camera: legacy.camera,
+                    bloom: legacy.bloom,
+                    generation: legacy.generation.map(|generation| WorldGenerationConfig {
+                        shape: generation.shape,
+                        element: generation.element,
+                        ..WorldGenerationConfig::default()
+                    }),
+                });
+            }
+
             let legacy: LegacyWorldMetadata = bincode::deserialize(&bytes)?;
             Ok(WorldMetadata {
                 id: legacy.id,
@@ -366,26 +458,37 @@ fn read_world_metadata<P: AsRef<Path>>(path: P) -> Result<WorldMetadata, SaveGam
                 last_played_at: legacy.last_played_at,
                 camera: None,
                 bloom: None,
+                generation: None,
             })
         }
     }
 }
 
 fn world_metadata_path_from_world_dir(world_dir: &Path) -> Option<PathBuf> {
-    world_dir.parent().map(|parent| parent.join(WORLD_META_FILE))
+    world_dir
+        .parent()
+        .map(|parent| parent.join(WORLD_META_FILE))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::Serialize;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_root() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("worldseed-savegame-{unique}"));
+        let root = std::env::temp_dir().join(format!(
+            "worldseed-savegame-{}-{}-{}",
+            std::process::id(),
+            unique,
+            TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&root);
         root
     }
@@ -394,7 +497,8 @@ mod tests {
     fn create_slot_and_worlds_round_trip() {
         let root = temp_root();
         let slot = create_slot(&root).expect("slot should be created");
-        let world = create_world(&root, &slot.id).expect("world should be created");
+        let world = create_world(&root, &slot.id, WorldGenerationConfig::default())
+            .expect("world should be created");
 
         let slots = list_slots(&root).expect("slots should list");
         let worlds = list_worlds(&root, &slot.id).expect("worlds should list");
@@ -404,6 +508,13 @@ mod tests {
         assert_eq!(slots[0].id, slot.id);
         assert_eq!(slots[0].available_columns, 1);
         assert_eq!(worlds[0].id, world.id);
+        assert_eq!(
+            worlds[0].generation,
+            Some(WorldGenerationConfig {
+                seed: world_generation_seed_from_id(&world.id),
+                ..WorldGenerationConfig::default()
+            })
+        );
         assert!(world_save_path(&root, &slot.id, &world.id).exists());
 
         let _ = fs::remove_dir_all(root);
@@ -457,7 +568,8 @@ mod tests {
     fn world_camera_persists_for_world_directory() {
         let root = temp_root();
         let slot = create_slot(&root).expect("slot should be created");
-        let world = create_world(&root, &slot.id).expect("world should be created");
+        let world = create_world(&root, &slot.id, WorldGenerationConfig::default())
+            .expect("world should be created");
         let world_dir = world_save_path(&root, &slot.id, &world.id);
 
         set_world_camera_for_world_dir(
@@ -490,7 +602,8 @@ mod tests {
     fn world_bloom_persists_for_world_directory() {
         let root = temp_root();
         let slot = create_slot(&root).expect("slot should be created");
-        let world = create_world(&root, &slot.id).expect("world should be created");
+        let world = create_world(&root, &slot.id, WorldGenerationConfig::default())
+            .expect("world should be created");
         let world_dir = world_save_path(&root, &slot.id, &world.id);
 
         set_world_bloom_for_world_dir(&world_dir, 9).expect("world bloom should persist");
@@ -532,6 +645,94 @@ mod tests {
         assert_eq!(worlds.len(), 1);
         assert_eq!(worlds[0].camera, None);
         assert_eq!(worlds[0].bloom, None);
+        assert_eq!(worlds[0].generation, None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn create_world_normalizes_generation_seed_and_power() {
+        let root = temp_root();
+        let slot = create_slot(&root).expect("slot should be created");
+        let world = create_world(
+            &root,
+            &slot.id,
+            WorldGenerationConfig {
+                shape: WorldShape::Island,
+                element: WorldElement::Dirt,
+                power: 0,
+                seed: 999,
+            },
+        )
+        .expect("world should be created");
+
+        let generation = world.generation.expect("generation should be present");
+        assert_eq!(generation.shape, WorldShape::Island);
+        assert_eq!(generation.element, WorldElement::Dirt);
+        assert_eq!(generation.power, 1);
+        assert_eq!(generation.seed, world_generation_seed_from_id(&world.id));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_missing_power_and_seed_uses_defaults() {
+        #[derive(Serialize)]
+        struct LegacyWorldMetadataWithGeneration {
+            id: String,
+            display_name: String,
+            created_at: u64,
+            last_played_at: u64,
+            camera: Option<CameraState>,
+            bloom: Option<u16>,
+            generation: Option<LegacyWorldGenerationConfig>,
+        }
+
+        #[derive(Serialize)]
+        struct LegacyWorldGenerationConfig {
+            shape: WorldShape,
+            element: WorldElement,
+        }
+
+        let root = temp_root();
+        let slot = create_slot(&root).expect("slot should be created");
+        let world_id = "world-legacy-generation";
+        let metadata = LegacyWorldMetadataWithGeneration {
+            id: world_id.to_string(),
+            display_name: "Legacy World".to_string(),
+            created_at: 1,
+            last_played_at: 2,
+            camera: Some(CameraState {
+                x: 10.0,
+                y: 20.0,
+                zoom: 1.25,
+            }),
+            bloom: Some(3),
+            generation: Some(LegacyWorldGenerationConfig {
+                shape: WorldShape::Island,
+                element: WorldElement::Grass,
+            }),
+        };
+
+        let world_dir = world_path(&root, &slot.id, world_id);
+        fs::create_dir_all(world_dir.join("world/chunks")).expect("world dir should be created");
+        write_metadata(world_dir.join(WORLD_META_FILE), &metadata)
+            .expect("legacy world metadata should write");
+
+        let decoded = load_world_metadata_for_world_dir(world_dir.join("world"))
+            .expect("world metadata should load")
+            .expect("world metadata should exist");
+
+        assert_eq!(decoded.camera, metadata.camera);
+        assert_eq!(decoded.bloom, metadata.bloom);
+        assert_eq!(
+            decoded.generation,
+            Some(WorldGenerationConfig {
+                shape: WorldShape::Island,
+                element: WorldElement::Grass,
+                ..WorldGenerationConfig::default()
+            })
+        );
 
         let _ = fs::remove_dir_all(root);
     }

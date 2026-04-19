@@ -2,8 +2,9 @@ use super::{
     Direction, EntityBundle, EntityState, ForestGuardian, GrowingTree, GuardianAnimations, Health,
     Human, Position, RenderStratum, RoamingBehavior, RtsTree, RtsTreeVariant, Snail, TreeSpawner,
     TreeSpirit, TreeVariant, VariantTree, VariantTreeAppearance, Velocity, WindingPath,
-    WorldRenderDepth,
+    WorldClickableEntity, WorldRenderDepth,
 };
+use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use std::collections::hash_map::RandomState;
@@ -193,8 +194,10 @@ pub fn spawn_human(
     commands
         .spawn((
             Human,
+            WorldClickableEntity,
             EntityBundle::new(position.x, position.y, 100.0),
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, PLAYER_DEPTH_BIAS),
+            Pickable::default(),
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {
@@ -223,8 +226,10 @@ pub fn spawn_saved_human(
     commands
         .spawn((
             Human,
+            WorldClickableEntity,
             entity_bundle_from_state(actor),
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, PLAYER_DEPTH_BIAS),
+            Pickable::default(),
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {
@@ -267,10 +272,12 @@ pub fn spawn_forest_guardian(
     commands
         .spawn((
             ForestGuardian::new(tree_variant),
+            WorldClickableEntity,
             EntityBundle::new(position.x, position.y, 150.0),
             RoamingBehavior::new(position, 100.0, 15.0), // Roam within 100px at 15px/s
             TreeSpawner::default_guardian(),             // Spawn trees periodically
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, FOREST_GUARDIAN_DEPTH_BIAS),
+            Pickable::default(),
             Sprite::from_atlas_image(
                 idle_texture.clone(),
                 TextureAtlas {
@@ -324,10 +331,12 @@ pub fn spawn_saved_forest_guardian(
     commands
         .spawn((
             guardian,
+            WorldClickableEntity,
             entity_bundle_from_state(actor),
             roaming,
             tree_spawner,
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, FOREST_GUARDIAN_DEPTH_BIAS),
+            Pickable::default(),
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {
@@ -365,9 +374,11 @@ pub fn spawn_snail(
     commands
         .spawn((
             Snail,
+            WorldClickableEntity,
             EntityBundle::new(position.x, position.y, 500.0),
             WindingPath::new(2.5), // Very slow winding movement at 2.5 px/s (8x slower)
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, SNAIL_DEPTH_BIAS),
+            Pickable::default(),
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {
@@ -397,9 +408,11 @@ pub fn spawn_saved_snail(
     commands
         .spawn((
             Snail,
+            WorldClickableEntity,
             entity_bundle_from_state(actor),
             winding_path,
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, SNAIL_DEPTH_BIAS),
+            Pickable::default(),
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {
@@ -441,9 +454,11 @@ pub fn spawn_tree_spirit(
     commands
         .spawn((
             TreeSpirit,
+            WorldClickableEntity,
             growing_tree,
             Position::new(position.x, position.y),
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, TREE_SPIRIT_DEPTH_BIAS),
+            Pickable::default(),
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {
@@ -475,9 +490,11 @@ pub fn spawn_saved_tree_spirit(
     commands
         .spawn((
             TreeSpirit,
+            WorldClickableEntity,
             growing_tree,
             Position::new(position.x, position.y),
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, TREE_SPIRIT_DEPTH_BIAS),
+            Pickable::default(),
             Sprite::from_atlas_image(
                 texture,
                 TextureAtlas {
@@ -582,9 +599,11 @@ pub fn spawn_variant_tree(
     commands
         .spawn((
             VariantTree,
+            WorldClickableEntity,
             growing_tree,
             Position::new(position.x, position.y),
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, VARIANT_TREE_DEPTH_BIAS),
+            Pickable::default(),
             sprite,
             world_anchor(),
             Transform::from_xyz(position.x, position.y, 0.0).with_scale(Vec3::splat(initial_scale)),
@@ -605,9 +624,11 @@ pub fn spawn_saved_variant_tree(
     commands
         .spawn((
             VariantTree,
+            WorldClickableEntity,
             growing_tree,
             Position::new(position.x, position.y),
             WorldRenderDepth::with_bias(RenderStratum::WorldObject, VARIANT_TREE_DEPTH_BIAS),
+            Pickable::default(),
             sprite,
             world_anchor(),
             Transform::from_xyz(position.x, position.y, 0.0).with_scale(Vec3::splat(scale)),

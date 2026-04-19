@@ -6,5 +6,6 @@ pub mod savegame;
 pub mod serialization;
 
 // Re-export commonly used items
-pub use generator::generate_chunk;
+pub use generator::{generate_chunk, pregenerate_world_chunks};
 pub use manager::{TileModification, WorldManager, WorldStats};
+pub use savegame::{WorldElement, WorldGenerationConfig, WorldShape};
