@@ -67,12 +67,14 @@ const BASE_PAN_SPEED: f32 = 200.0; // Base speed for panning when at minimum zoo
 const MAIN_MENU_UI_TEXTURE_PATH: &str = "ui/Classic_UI_Only.png";
 const DRAFT_CARD_FRAME_TEXTURE_PATH: &str = "ui/Card_Frame_40x48.png";
 const DRAFT_NAME_PLATE_TEXTURE_PATH: &str = "ui/Plate_Tileset_8x8.png";
+const DRAFT_ISLAND_TEXTURE_PATH: &str = "ui/New_Hills_forgotten_plains.png";
 const DRAFT_CARD_FRAME_TILE_SIZE: UVec2 = UVec2::new(40, 48);
 const DRAFT_CARD_FRAME_COLUMNS: u32 = 2;
 const DRAFT_CARD_FRAME_ROWS: u32 = 4;
 const DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX: usize = 0;
-const DRAFT_GRID_SIDE: usize = 3;
-const DRAFT_GRID_CELLS: usize = DRAFT_GRID_SIDE * DRAFT_GRID_SIDE;
+const DRAFT_CARD_FRAME_BRONZE_RED_INDEX: usize = 1;
+const DRAFT_MAX_COLUMNS: usize = 5;
+const DRAFT_MAX_ROWS: usize = 5;
 const DRAFT_GRID_SLOT_WIDTH: f32 = 132.0;
 const DRAFT_GRID_SLOT_HEIGHT: f32 = 156.0;
 const DRAFT_GRID_CARD_WIDTH: f32 = 120.0;
@@ -410,8 +412,14 @@ struct DraftSetupScaler;
 struct DraftTrayCard;
 
 #[derive(Component)]
-struct DraftGridCell {
+struct DraftGridColumn {
     index: usize,
+}
+
+#[derive(Component)]
+struct DraftGridCell {
+    column: usize,
+    row: usize,
 }
 
 #[derive(Component)]
@@ -419,6 +427,9 @@ struct DraftPlacedCardVisual;
 
 #[derive(Component)]
 struct DraftPlacedCardIcon;
+
+#[derive(Component)]
+struct DraftCardFrame;
 
 #[derive(Component)]
 struct DraftCardIcon;
@@ -459,6 +470,21 @@ enum DraftCard {
     Snail,
     Grass,
     Dirt,
+    Island,
+}
+
+impl DraftCard {
+    fn unlocks_next_row(self) -> bool {
+        matches!(self, Self::Island)
+    }
+
+    fn frame_index(self) -> usize {
+        if self.unlocks_next_row() {
+            DRAFT_CARD_FRAME_BRONZE_RED_INDEX
+        } else {
+            DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX
+        }
+    }
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -506,13 +532,79 @@ struct BloomSelection {
 
 #[derive(Resource, Clone, Debug)]
 struct DraftBoard {
-    cells: [Option<DraftCard>; DRAFT_GRID_CELLS],
+    available_columns: u8,
+    cells: [[Option<DraftCard>; DRAFT_MAX_ROWS]; DRAFT_MAX_COLUMNS],
 }
 
 impl Default for DraftBoard {
     fn default() -> Self {
         Self {
-            cells: [None; DRAFT_GRID_CELLS],
+            available_columns: 1,
+            cells: [[None; DRAFT_MAX_ROWS]; DRAFT_MAX_COLUMNS],
+        }
+    }
+}
+
+impl DraftBoard {
+    fn reset(&mut self, available_columns: u8) {
+        self.available_columns = available_columns.clamp(1, DRAFT_MAX_COLUMNS as u8);
+        self.cells = [[None; DRAFT_MAX_ROWS]; DRAFT_MAX_COLUMNS];
+    }
+
+    fn available_columns(&self) -> usize {
+        self.available_columns as usize
+    }
+
+    fn card_at(&self, column: usize, row: usize) -> Option<DraftCard> {
+        self.cells
+            .get(column)
+            .and_then(|rows| rows.get(row))
+            .copied()
+            .flatten()
+    }
+
+    fn is_column_unlocked(&self, column: usize) -> bool {
+        column < self.available_columns()
+    }
+
+    fn is_row_unlocked(&self, column: usize, row: usize) -> bool {
+        if !self.is_column_unlocked(column) || row >= DRAFT_MAX_ROWS {
+            return false;
+        }
+
+        if row == 0 {
+            return true;
+        }
+
+        self.card_at(column, row - 1)
+            .map(DraftCard::unlocks_next_row)
+            .unwrap_or(false)
+            && self.is_row_unlocked(column, row - 1)
+    }
+
+    fn can_place(&self, column: usize, row: usize) -> bool {
+        self.is_row_unlocked(column, row)
+    }
+
+    fn place_card(&mut self, column: usize, row: usize, card: DraftCard) -> bool {
+        if !self.can_place(column, row) {
+            return false;
+        }
+
+        self.cells[column][row] = Some(card);
+        self.clear_locked_rows_in_column(column);
+        true
+    }
+
+    fn clear_locked_rows_in_column(&mut self, column: usize) {
+        if column >= DRAFT_MAX_COLUMNS {
+            return;
+        }
+
+        for row in 1..DRAFT_MAX_ROWS {
+            if !self.is_row_unlocked(column, row) {
+                self.cells[column][row] = None;
+            }
         }
     }
 }
@@ -665,6 +757,7 @@ fn main() {
                 update_draft_drag_cursor,
                 update_draft_hovered_cell.after(update_draft_drag_cursor),
                 handle_draft_card_drop.after(update_draft_hovered_cell),
+                handle_draft_debug_unlock_columns,
                 handle_draft_confirm_button_interaction,
                 update_draft_visuals,
             )
@@ -1709,6 +1802,7 @@ fn draft_card_label(card: DraftCard) -> &'static str {
         DraftCard::Snail => "Snail",
         DraftCard::Grass => "Grass",
         DraftCard::Dirt => "Dirt",
+        DraftCard::Island => "Island Card",
     }
 }
 
@@ -1820,9 +1914,13 @@ fn clicked_world_entity_screen_position(
             continue;
         }
 
-        let Some((center, size)) =
-            sprite_world_bounds(sprite, anchor.copied(), transform, images, texture_atlas_layouts)
-        else {
+        let Some((center, size)) = sprite_world_bounds(
+            sprite,
+            anchor.copied(),
+            transform,
+            images,
+            texture_atlas_layouts,
+        ) else {
             continue;
         };
 
@@ -1864,6 +1962,7 @@ fn set_draft_card_icon(
     match card {
         DraftCard::Human => {
             image_node.image = assets.load("characters/human_walk.png");
+            image_node.rect = None;
             image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
                 layout: layouts.add(TextureAtlasLayout::from_grid(
                     UVec2::splat(32),
@@ -1877,6 +1976,7 @@ fn set_draft_card_icon(
         }
         DraftCard::Guardian => {
             image_node.image = assets.load("creatures/forest_guardians/oak_guardian_idle.png");
+            image_node.rect = None;
             image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
                 layout: layouts.add(TextureAtlasLayout::from_grid(
                     UVec2::splat(32),
@@ -1890,6 +1990,7 @@ fn set_draft_card_icon(
         }
         DraftCard::Snail => {
             image_node.image = assets.load("creatures/snail/snail_crawl.png");
+            image_node.rect = None;
             image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
                 layout: layouts.add(TextureAtlasLayout::from_grid(
                     UVec2::splat(32),
@@ -1903,6 +2004,7 @@ fn set_draft_card_icon(
         }
         DraftCard::Grass => {
             image_node.image = assets.load("tilesets/terrain_array_ui.png");
+            image_node.rect = None;
             image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
                 layout: layouts.add(TextureAtlasLayout::from_grid(
                     UVec2::splat(8),
@@ -1916,6 +2018,7 @@ fn set_draft_card_icon(
         }
         DraftCard::Dirt => {
             image_node.image = assets.load("tilesets/terrain_array_ui.png");
+            image_node.rect = None;
             image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
                 layout: layouts.add(TextureAtlasLayout::from_grid(
                     UVec2::splat(8),
@@ -1927,6 +2030,11 @@ fn set_draft_card_icon(
                 index: 1,
             });
         }
+        DraftCard::Island => {
+            image_node.image = assets.load(DRAFT_ISLAND_TEXTURE_PATH);
+            image_node.rect = Some(Rect::new(16.0, 8.0, 40.0, 32.0));
+            image_node.texture_atlas = None;
+        }
     }
 }
 
@@ -1937,8 +2045,16 @@ fn setup_draft_setup(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut draft_board: ResMut<DraftBoard>,
     mut draft_drag_state: ResMut<DraftDragState>,
+    save_state: Res<SaveGameState>,
 ) {
-    draft_board.cells.fill(None);
+    let available_columns = save_state
+        .draft_target_slot_id
+        .as_deref()
+        .or(save_state.active_slot_id.as_deref())
+        .and_then(|slot_id| save_state.slots.iter().find(|slot| slot.id == slot_id))
+        .map(|slot| slot.available_columns)
+        .unwrap_or(1);
+    draft_board.reset(available_columns);
     draft_drag_state.active_card = None;
     draft_drag_state.hovered_cell = None;
     draft_drag_state.cursor_pos = None;
@@ -2031,7 +2147,9 @@ fn setup_draft_setup(
                         margin: UiRect::bottom(Val::Px(8.0)),
                         ..default()
                     },
-                    Text::new("Drag cards from the tray into the 3x3 grid, then confirm."),
+                    Text::new(
+                        "Drag cards into unlocked columns. Island Cards unlock the row below.",
+                    ),
                     TextFont {
                         font_size: 16.0,
                         ..default()
@@ -2041,25 +2159,27 @@ fn setup_draft_setup(
 
                 content
                     .spawn((Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(10.0),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(10.0),
                         ..default()
                     },))
                     .with_children(|grid_container| {
-                        for row in 0..DRAFT_GRID_SIDE {
+                        for column in 0..DRAFT_MAX_COLUMNS {
                             grid_container
-                                .spawn((Node {
-                                    flex_direction: FlexDirection::Row,
-                                    column_gap: Val::Px(10.0),
-                                    ..default()
-                                },))
-                                .with_children(|grid_row| {
-                                    for col in 0..DRAFT_GRID_SIDE {
-                                        let index = row * DRAFT_GRID_SIDE + col;
-                                        grid_row
+                                .spawn((
+                                    DraftGridColumn { index: column },
+                                    Node {
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: Val::Px(10.0),
+                                        ..default()
+                                    },
+                                ))
+                                .with_children(|grid_column| {
+                                    for row in 0..DRAFT_MAX_ROWS {
+                                        grid_column
                                             .spawn((
                                                 Button,
-                                                DraftGridCell { index },
+                                                DraftGridCell { column, row },
                                                 Node {
                                                     width: Val::Px(DRAFT_GRID_SLOT_WIDTH),
                                                     height: Val::Px(DRAFT_GRID_SLOT_HEIGHT),
@@ -2095,13 +2215,14 @@ fn setup_draft_setup(
                                                 ))
                                                 .with_children(|frame| {
                                                     frame.spawn((
+                                                        DraftCardFrame,
                                                         ImageNode {
                                                             image: frame_texture.clone(),
                                                             image_mode: NodeImageMode::Stretch,
                                                             texture_atlas: Some(TextureAtlas {
                                                                 layout: frame_layout.clone(),
-                                                                index:
-                                                                    DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX,
+                                                                index: DraftCard::Human
+                                                                    .frame_index(),
                                                             }),
                                                             ..default()
                                                         },
@@ -2124,13 +2245,14 @@ fn setup_draft_setup(
                                                     ));
 
                                                     frame.spawn((
+                                                        DraftCardFrame,
                                                         ImageNode {
                                                             image: frame_texture.clone(),
                                                             image_mode: NodeImageMode::Stretch,
                                                             texture_atlas: Some(TextureAtlas {
                                                                 layout: frame_layout.clone(),
-                                                                index:
-                                                                    DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX,
+                                                                index: DraftCard::Human
+                                                                    .frame_index(),
                                                             }),
                                                             ..default()
                                                         },
@@ -2164,6 +2286,7 @@ fn setup_draft_setup(
                             DraftCard::Snail,
                             DraftCard::Grass,
                             DraftCard::Dirt,
+                            DraftCard::Island,
                         ] {
                             let label = draft_card_label(card);
                             let label_plate_height = draft_card_label_plate_height(label);
@@ -2195,12 +2318,13 @@ fn setup_draft_setup(
                                     },))
                                     .with_children(|frame| {
                                         frame.spawn((
+                                            DraftCardFrame,
                                             ImageNode {
                                                 image: frame_texture.clone(),
                                                 image_mode: NodeImageMode::Stretch,
                                                 texture_atlas: Some(TextureAtlas {
                                                     layout: frame_layout.clone(),
-                                                    index: DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX,
+                                                    index: card.frame_index(),
                                                 }),
                                                 ..default()
                                             },
@@ -2233,12 +2357,13 @@ fn setup_draft_setup(
                                         ));
 
                                         frame.spawn((
+                                            DraftCardFrame,
                                             ImageNode {
                                                 image: frame_texture.clone(),
                                                 image_mode: NodeImageMode::Stretch,
                                                 texture_atlas: Some(TextureAtlas {
                                                     layout: frame_layout.clone(),
-                                                    index: DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX,
+                                                    index: card.frame_index(),
                                                 }),
                                                 ..default()
                                             },
@@ -2291,48 +2416,49 @@ fn setup_draft_setup(
                         }
                     });
 
-                content.spawn((
-                    Button,
-                    DraftConfirmButton,
-                    button_sprites,
-                    DraftConfirmButtonPressState::default(),
-                    Node {
-                        width: Val::Px(MAIN_MENU_BUTTON_WIDTH),
-                        height: Val::Px(MAIN_MENU_BUTTON_HEIGHT),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        padding: UiRect::horizontal(Val::Px(24.0)),
-                        margin: UiRect::top(Val::Px(8.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::NONE),
-                ))
-                .with_children(|button| {
-                    button.spawn((
-                        MainMenuButtonImage,
-                        ImageNode {
-                            image: ui_texture,
-                            rect: Some(main_menu_button_standard_rect()),
-                            image_mode: main_menu_button_image_mode(),
-                            ..default()
-                        },
+                content
+                    .spawn((
+                        Button,
+                        DraftConfirmButton,
+                        button_sprites,
+                        DraftConfirmButtonPressState::default(),
                         Node {
-                            width: Val::Px(MAIN_MENU_BUTTON_SOURCE_WIDTH),
-                            height: Val::Px(MAIN_MENU_BUTTON_SOURCE_HEIGHT),
-                            position_type: PositionType::Absolute,
+                            width: Val::Px(MAIN_MENU_BUTTON_WIDTH),
+                            height: Val::Px(MAIN_MENU_BUTTON_HEIGHT),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            padding: UiRect::horizontal(Val::Px(24.0)),
+                            margin: UiRect::top(Val::Px(8.0)),
                             ..default()
                         },
-                        UiTransform::from_scale(Vec2::splat(MAIN_MENU_BUTTON_SCALE)),
-                    ));
-                    button.spawn((
-                        Text::new("Confirm"),
-                        TextFont {
-                            font_size: 28.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.19, 0.12, 0.06)),
-                    ));
-                });
+                        BackgroundColor(Color::NONE),
+                    ))
+                    .with_children(|button| {
+                        button.spawn((
+                            MainMenuButtonImage,
+                            ImageNode {
+                                image: ui_texture,
+                                rect: Some(main_menu_button_standard_rect()),
+                                image_mode: main_menu_button_image_mode(),
+                                ..default()
+                            },
+                            Node {
+                                width: Val::Px(MAIN_MENU_BUTTON_SOURCE_WIDTH),
+                                height: Val::Px(MAIN_MENU_BUTTON_SOURCE_HEIGHT),
+                                position_type: PositionType::Absolute,
+                                ..default()
+                            },
+                            UiTransform::from_scale(Vec2::splat(MAIN_MENU_BUTTON_SCALE)),
+                        ));
+                        button.spawn((
+                            Text::new("Confirm"),
+                            TextFont {
+                                font_size: 28.0,
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.19, 0.12, 0.06)),
+                        ));
+                    });
             });
         });
 
@@ -2355,12 +2481,13 @@ fn setup_draft_setup(
         ))
         .with_children(|ghost| {
             ghost.spawn((
+                DraftCardFrame,
                 ImageNode {
                     image: frame_texture.clone(),
                     image_mode: NodeImageMode::Stretch,
                     texture_atlas: Some(TextureAtlas {
                         layout: frame_layout.clone(),
-                        index: DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX,
+                        index: DraftCard::Human.frame_index(),
                     }),
                     ..default()
                 },
@@ -2392,12 +2519,13 @@ fn setup_draft_setup(
             ));
 
             ghost.spawn((
+                DraftCardFrame,
                 ImageNode {
                     image: frame_texture,
                     image_mode: NodeImageMode::Stretch,
                     texture_atlas: Some(TextureAtlas {
                         layout: frame_layout,
-                        index: DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX,
+                        index: DraftCard::Human.frame_index(),
                     }),
                     ..default()
                 },
@@ -2504,8 +2632,9 @@ fn update_draft_drag_cursor(
 
 fn update_draft_hovered_cell(
     mut next_hovered_cell: Local<Option<Option<usize>>>,
-    cells: Query<(&DraftGridCell, &ComputedNode, &UiGlobalTransform)>,
+    cells: Query<(&DraftGridCell, &ComputedNode, &UiGlobalTransform, &Node)>,
     mut draft_drag_state: ResMut<DraftDragState>,
+    draft_board: Res<DraftBoard>,
 ) {
     if draft_drag_state.active_card.is_none() {
         if *next_hovered_cell != Some(None) {
@@ -2516,9 +2645,16 @@ fn update_draft_hovered_cell(
     }
 
     let hovered = draft_drag_state.cursor_pos.and_then(|cursor| {
-        cells.iter().find_map(|(cell, computed_node, transform)| {
-            point_in_ui_node(cursor, computed_node, transform).then_some(cell.index)
-        })
+        cells
+            .iter()
+            .find_map(|(cell, computed_node, transform, node)| {
+                if node.display == Display::None || !draft_board.can_place(cell.column, cell.row) {
+                    return None;
+                }
+
+                point_in_ui_node(cursor, computed_node, transform)
+                    .then_some(cell.column * DRAFT_MAX_ROWS + cell.row)
+            })
     });
 
     if *next_hovered_cell != Some(hovered) {
@@ -2538,12 +2674,47 @@ fn handle_draft_card_drop(
 
     if let (Some(card), Some(index)) = (draft_drag_state.active_card, draft_drag_state.hovered_cell)
     {
-        draft_board.cells[index] = Some(card);
+        let column = index / DRAFT_MAX_ROWS;
+        let row = index % DRAFT_MAX_ROWS;
+        draft_board.place_card(column, row, card);
     }
 
     draft_drag_state.active_card = None;
     draft_drag_state.hovered_cell = None;
     draft_drag_state.cursor_pos = None;
+}
+
+fn handle_draft_debug_unlock_columns(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut draft_board: ResMut<DraftBoard>,
+    mut save_state: ResMut<SaveGameState>,
+) {
+    if !keyboard.just_pressed(KeyCode::Equal) {
+        return;
+    }
+
+    let Some(slot_id) = save_state
+        .draft_target_slot_id
+        .clone()
+        .or_else(|| save_state.active_slot_id.clone())
+    else {
+        return;
+    };
+
+    let next_columns = (draft_board.available_columns + 1).min(DRAFT_MAX_COLUMNS as u8);
+    if next_columns == draft_board.available_columns {
+        return;
+    }
+
+    if let Err(err) =
+        savegame::set_slot_available_columns(&save_state.root_dir, &slot_id, next_columns)
+    {
+        error!("Failed to update draft columns for slot {slot_id}: {err}");
+        return;
+    }
+
+    draft_board.available_columns = next_columns;
+    save_state.refresh_slots();
 }
 
 fn handle_draft_confirm_button_interaction(
@@ -2604,16 +2775,47 @@ fn update_draft_visuals(
     mut cells: Query<
         (
             &DraftGridCell,
+            &mut Node,
             &Children,
             &mut BackgroundColor,
             &mut BorderColor,
         ),
-        (With<DraftGridCell>, Without<DraftTrayCard>),
+        (
+            With<DraftGridCell>,
+            Without<DraftTrayCard>,
+            Without<DraftCardGhost>,
+        ),
+    >,
+    mut columns: Query<
+        (&DraftGridColumn, &mut Node),
+        (Without<DraftGridCell>, Without<DraftCardGhost>),
     >,
     mut placed_cards: Query<(&Children, &mut Visibility), With<DraftPlacedCardVisual>>,
-    mut placed_card_icons: Query<&mut ImageNode, With<DraftPlacedCardIcon>>,
+    mut placed_card_icons: Query<
+        &mut ImageNode,
+        (
+            With<DraftPlacedCardIcon>,
+            Without<DraftCardIcon>,
+            Without<DraftCardFrame>,
+        ),
+    >,
+    mut draft_card_frames: Query<
+        &mut ImageNode,
+        (
+            With<DraftCardFrame>,
+            Without<DraftPlacedCardIcon>,
+            Without<DraftCardIcon>,
+        ),
+    >,
     mut ghost_query: Query<(&Children, &mut Node, &mut UiTransform), With<DraftCardGhost>>,
-    mut ghost_icons: Query<&mut ImageNode, (With<DraftCardIcon>, Without<DraftPlacedCardIcon>)>,
+    mut ghost_icons: Query<
+        &mut ImageNode,
+        (
+            With<DraftCardIcon>,
+            Without<DraftPlacedCardIcon>,
+            Without<DraftCardFrame>,
+        ),
+    >,
 ) {
     let assets_ref = assets.as_deref();
     let draft_layout_scale = windows
@@ -2636,9 +2838,25 @@ fn update_draft_visuals(
         };
     }
 
-    for (cell, children, mut bg_color, mut border_color) in &mut cells {
-        let occupied = draft_board.cells[cell.index];
-        let is_hovered = draft_drag_state.hovered_cell == Some(cell.index);
+    for (column, mut node) in &mut columns {
+        node.display = if draft_board.is_column_unlocked(column.index) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+
+    for (cell, mut node, children, mut bg_color, mut border_color) in &mut cells {
+        let occupied = draft_board.card_at(cell.column, cell.row);
+        let is_visible = draft_board.is_row_unlocked(cell.column, cell.row);
+        let cell_index = cell.column * DRAFT_MAX_ROWS + cell.row;
+        let is_hovered = draft_drag_state.hovered_cell == Some(cell_index);
+
+        node.display = if is_visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
 
         *bg_color = match occupied {
             Some(_) => BackgroundColor(Color::srgb(0.09, 0.1, 0.12)),
@@ -2662,6 +2880,11 @@ fn update_draft_visuals(
                                 assets_ref,
                                 texture_atlas_layouts.as_deref_mut(),
                             );
+                        }
+                        if let Ok(mut image) = draft_card_frames.get_mut(*placed_card_child) {
+                            if let Some(texture_atlas) = image.texture_atlas.as_mut() {
+                                texture_atlas.index = card.frame_index();
+                            }
                         }
                     }
                     *visibility = Visibility::Inherited;
@@ -2694,6 +2917,11 @@ fn update_draft_visuals(
                         assets_ref,
                         texture_atlas_layouts.as_deref_mut(),
                     );
+                }
+                if let Ok(mut image) = draft_card_frames.get_mut(*child) {
+                    if let Some(texture_atlas) = image.texture_atlas.as_mut() {
+                        texture_atlas.index = card.frame_index();
+                    }
                 }
             }
         } else {
@@ -3292,8 +3520,7 @@ fn setup_ui(
                         BackgroundColor(Color::NONE),
                     ));
 
-                    let mut halo_timer =
-                        Timer::from_seconds(BLOOM_HALO_DURATION, TimerMode::Once);
+                    let mut halo_timer = Timer::from_seconds(BLOOM_HALO_DURATION, TimerMode::Once);
                     halo_timer.pause();
 
                     pool.spawn((
@@ -3541,14 +3768,7 @@ fn pulse_bloom_halo_on_world_click(
             ),
             With<Node>,
         >,
-        Query<
-            (
-                &mut WorldClickHaloPulse,
-                &mut Transform,
-                &mut Visibility,
-            ),
-            With<WorldClickHalo>,
-        >,
+        Query<(&mut WorldClickHaloPulse, &mut Transform, &mut Visibility), With<WorldClickHalo>>,
     )>,
 ) {
     if !bloom_selection.selected || !mouse_button.just_pressed(MouseButton::Left) {
@@ -3598,8 +3818,11 @@ fn pulse_bloom_halo_on_world_click(
         return;
     };
 
-    world_halo_transform.translation =
-        Vec3::new(world_center.x, world_center.y, render_z - WORLD_CLICK_HALO_DEPTH_OFFSET);
+    world_halo_transform.translation = Vec3::new(
+        world_center.x,
+        world_center.y,
+        render_z - WORLD_CLICK_HALO_DEPTH_OFFSET,
+    );
     world_halo_transform.scale = Vec3::splat(halo_diameter);
     *visibility = Visibility::Visible;
     world_pulse.base_diameter = halo_diameter;
@@ -3609,7 +3832,10 @@ fn pulse_bloom_halo_on_world_click(
 
 fn animate_bloom_halo(
     time: Res<Time>,
-    mut halo_query: Query<(&mut BloomHaloPulse, &mut Node, &mut BackgroundColor), With<BloomPoolHalo>>,
+    mut halo_query: Query<
+        (&mut BloomHaloPulse, &mut Node, &mut BackgroundColor),
+        With<BloomPoolHalo>,
+    >,
 ) {
     for (mut pulse, mut node, mut background_color) in &mut halo_query {
         if pulse.timer.is_paused() {
@@ -4112,6 +4338,7 @@ fn world_to_tile_pos(world_pos: Vec2) -> IVec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::RenderStratum;
 
     #[test]
     fn world_to_tile_pos_handles_positive_and_negative_coordinates() {
@@ -4267,7 +4494,7 @@ mod tests {
     }
 
     #[test]
-    fn draft_setup_spawns_a_3x3_grid() {
+    fn draft_setup_starts_with_one_visible_column() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_plugins(bevy::state::app::StatesPlugin)
@@ -4275,7 +4502,11 @@ mod tests {
             .init_resource::<DraftBoard>()
             .init_resource::<DraftDragState>()
             .init_resource::<SaveGameState>()
-            .add_systems(OnEnter(AppState::DraftSetup), setup_draft_setup);
+            .add_systems(OnEnter(AppState::DraftSetup), setup_draft_setup)
+            .add_systems(
+                Update,
+                update_draft_visuals.run_if(in_state(AppState::DraftSetup)),
+            );
 
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
@@ -4288,7 +4519,95 @@ mod tests {
             world.query::<&DraftGridCell>().iter(world).count()
         };
 
-        assert_eq!(grid_cell_count, 9);
+        assert_eq!(grid_cell_count, DRAFT_MAX_COLUMNS * DRAFT_MAX_ROWS);
+
+        let visible_column_count = {
+            let world = app.world_mut();
+            world
+                .query::<(&DraftGridColumn, &Node)>()
+                .iter(world)
+                .filter(|(_, node)| node.display != Display::None)
+                .count()
+        };
+
+        assert_eq!(visible_column_count, 1);
+    }
+
+    #[test]
+    fn island_card_unlocks_next_row_only_in_same_column() {
+        let mut board = DraftBoard::default();
+
+        assert!(board.is_row_unlocked(0, 0));
+        assert!(!board.is_row_unlocked(0, 1));
+
+        assert!(board.place_card(0, 0, DraftCard::Island));
+        assert!(board.is_row_unlocked(0, 1));
+
+        let mut non_unlocking_board = DraftBoard::default();
+        assert!(non_unlocking_board.place_card(0, 0, DraftCard::Human));
+        assert!(!non_unlocking_board.is_row_unlocked(0, 1));
+    }
+
+    #[test]
+    fn replacing_island_card_clears_cards_in_rows_it_no_longer_unlocks() {
+        let mut board = DraftBoard::default();
+
+        assert!(board.place_card(0, 0, DraftCard::Island));
+        assert!(board.place_card(0, 1, DraftCard::Human));
+        assert_eq!(board.card_at(0, 1), Some(DraftCard::Human));
+
+        assert!(board.place_card(0, 0, DraftCard::Grass));
+        assert!(!board.is_row_unlocked(0, 1));
+        assert_eq!(board.card_at(0, 1), None);
+
+        assert!(board.place_card(0, 0, DraftCard::Island));
+        assert!(board.is_row_unlocked(0, 1));
+        assert_eq!(board.card_at(0, 1), None);
+    }
+
+    #[test]
+    fn draft_plus_key_unlocks_columns_and_persists_slot_progress() {
+        use bevy::ecs::system::SystemState;
+
+        let mut world = World::new();
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+        world.insert_resource(DraftBoard::default());
+        world.insert_resource(SaveGameState::default());
+
+        let temp_root = std::env::temp_dir().join("worldseed-test-draft-columns");
+        let _ = fs::remove_dir_all(&temp_root);
+        let slot = savegame::create_slot(&temp_root).expect("slot should exist for draft columns");
+
+        {
+            let mut save_state = world.resource_mut::<SaveGameState>();
+            save_state.root_dir = temp_root.clone();
+            save_state.refresh_slots();
+            save_state.draft_target_slot_id = Some(slot.id.clone());
+        }
+
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Equal);
+
+        let mut system_state: SystemState<(
+            Res<ButtonInput<KeyCode>>,
+            ResMut<DraftBoard>,
+            ResMut<SaveGameState>,
+        )> = SystemState::new(&mut world);
+        let (keyboard, draft_board, save_state) = system_state.get_mut(&mut world);
+        handle_draft_debug_unlock_columns(keyboard, draft_board, save_state);
+        system_state.apply(&mut world);
+
+        assert_eq!(world.resource::<DraftBoard>().available_columns, 2);
+
+        let updated_slot = savegame::list_slots(&temp_root)
+            .expect("slots should list")
+            .into_iter()
+            .find(|candidate| candidate.id == slot.id)
+            .expect("updated slot should exist");
+        assert_eq!(updated_slot.available_columns, 2);
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]

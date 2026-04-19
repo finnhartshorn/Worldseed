@@ -42,6 +42,16 @@ pub struct SaveSlotMetadata {
     pub display_name: String,
     pub created_at: u64,
     pub last_played_at: u64,
+    #[serde(default = "default_available_columns")]
+    pub available_columns: u8,
+}
+
+#[derive(Deserialize)]
+struct LegacySaveSlotMetadata {
+    id: String,
+    display_name: String,
+    created_at: u64,
+    last_played_at: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -70,7 +80,7 @@ pub fn list_slots<P: AsRef<Path>>(root: P) -> Result<Vec<SaveSlotMetadata>, Save
             continue;
         }
 
-        slots.push(read_metadata(&meta_path)?);
+        slots.push(read_slot_metadata(&meta_path)?);
     }
 
     slots.sort_by(|a, b| {
@@ -125,6 +135,7 @@ pub fn create_slot<P: AsRef<Path>>(root: P) -> Result<SaveSlotMetadata, SaveGame
         display_name: format!("Slot {}", existing_slots.len() + 1),
         created_at: now,
         last_played_at: now,
+        available_columns: default_available_columns(),
     };
 
     let slot_path = slot_path(root, &slot_id);
@@ -173,8 +184,19 @@ pub fn most_recent_world<P: AsRef<Path>>(
 
 pub fn touch_slot<P: AsRef<Path>>(root: P, slot_id: &str) -> Result<(), SaveGameError> {
     let meta_path = slot_path(root.as_ref(), slot_id).join(SLOT_META_FILE);
-    let mut metadata: SaveSlotMetadata = read_metadata(&meta_path)?;
+    let mut metadata = read_slot_metadata(&meta_path)?;
     metadata.last_played_at = unix_timestamp_secs();
+    write_metadata(meta_path, &metadata)
+}
+
+pub fn set_slot_available_columns<P: AsRef<Path>>(
+    root: P,
+    slot_id: &str,
+    available_columns: u8,
+) -> Result<(), SaveGameError> {
+    let meta_path = slot_path(root.as_ref(), slot_id).join(SLOT_META_FILE);
+    let mut metadata = read_slot_metadata(&meta_path)?;
+    metadata.available_columns = available_columns.max(1);
     write_metadata(meta_path, &metadata)
 }
 
@@ -219,6 +241,10 @@ fn unique_id(prefix: &str, parent: &Path) -> Result<String, SaveGameError> {
     Ok(candidate)
 }
 
+fn default_available_columns() -> u8 {
+    1
+}
+
 fn unix_timestamp_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -247,13 +273,37 @@ fn read_metadata<T: for<'de> Deserialize<'de>, P: AsRef<Path>>(
     Ok(bincode::deserialize(&bytes)?)
 }
 
+fn read_slot_metadata<P: AsRef<Path>>(path: P) -> Result<SaveSlotMetadata, SaveGameError> {
+    let mut file = File::open(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+
+    match bincode::deserialize(&bytes) {
+        Ok(metadata) => Ok(metadata),
+        Err(_) => {
+            let legacy: LegacySaveSlotMetadata = bincode::deserialize(&bytes)?;
+            Ok(SaveSlotMetadata {
+                id: legacy.id,
+                display_name: legacy.display_name,
+                created_at: legacy.created_at,
+                last_played_at: legacy.last_played_at,
+                available_columns: default_available_columns(),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Serialize;
 
     fn temp_root() -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("worldseed-savegame-{}", unix_timestamp_secs()));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("worldseed-savegame-{unique}"));
         let _ = fs::remove_dir_all(&root);
         root
     }
@@ -270,8 +320,53 @@ mod tests {
         assert_eq!(slots.len(), 1);
         assert_eq!(worlds.len(), 1);
         assert_eq!(slots[0].id, slot.id);
+        assert_eq!(slots[0].available_columns, 1);
         assert_eq!(worlds[0].id, world.id);
         assert!(world_save_path(&root, &slot.id, &world.id).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn set_slot_available_columns_persists() {
+        let root = temp_root();
+        let slot = create_slot(&root).expect("slot should be created");
+
+        set_slot_available_columns(&root, &slot.id, 4).expect("slot columns should update");
+
+        let slots = list_slots(&root).expect("slots should list");
+        assert_eq!(slots[0].available_columns, 4);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_slot_metadata_defaults_available_columns_to_one() {
+        #[derive(Serialize)]
+        struct LegacySaveSlotMetadata {
+            id: String,
+            display_name: String,
+            created_at: u64,
+            last_played_at: u64,
+        }
+
+        let root = temp_root();
+        let slot_id = "slot-legacy";
+        let metadata = LegacySaveSlotMetadata {
+            id: slot_id.to_string(),
+            display_name: "Legacy Slot".to_string(),
+            created_at: 1,
+            last_played_at: 2,
+        };
+
+        let slot_dir = slot_path(&root, slot_id);
+        fs::create_dir_all(slot_dir.join("worlds")).expect("slot dir should be created");
+        write_metadata(slot_dir.join(SLOT_META_FILE), &metadata)
+            .expect("legacy metadata should write");
+
+        let slots = list_slots(&root).expect("slots should list");
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].available_columns, 1);
 
         let _ = fs::remove_dir_all(root);
     }
