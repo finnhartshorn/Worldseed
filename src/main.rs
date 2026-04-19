@@ -4026,7 +4026,7 @@ fn update_bloom_pool(
 }
 
 fn handle_bloom_pool_click(
-    trigger: On<Pointer<Press>>,
+    trigger: On<Pointer<Click>>,
     button_query: Query<(), With<BloomPoolButton>>,
     mut bloom_selection: ResMut<BloomSelection>,
     mut placement_mode: ResMut<PlacementMode>,
@@ -4127,7 +4127,7 @@ fn pulse_bloom_halo_on_world_click(
         return;
     };
 
-    let Some(cursor) = window.cursor_position() else {
+    let Some(cursor) = window.physical_cursor_position() else {
         return;
     };
 
@@ -4257,7 +4257,7 @@ fn animate_world_click_halo(
 }
 
 fn button_interaction(
-    trigger: On<Pointer<Press>>,
+    trigger: On<Pointer<Click>>,
     mut param_set: ParamSet<(
         Query<(&EntityType, Option<&GuardianButton>), With<Button>>,
         Query<(&mut EntityType, &Children), With<GuardianButton>>,
@@ -4348,7 +4348,7 @@ fn guardian_button_right_click(
 }
 
 fn terrain_button_interaction(
-    trigger: On<Pointer<Press>>,
+    trigger: On<Pointer<Click>>,
     mut param_set: ParamSet<(
         Query<(&TerrainType, Option<&TerrainButton>), With<Button>>,
         Query<(&mut TerrainType, &Children), With<TerrainButton>>,
@@ -4549,7 +4549,7 @@ fn handle_entity_placement(
     };
 
     // Get cursor position in window
-    let Some(cursor_pos) = window.cursor_position() else {
+    let Some(cursor_pos) = window.physical_cursor_position() else {
         return;
     };
 
@@ -4634,7 +4634,7 @@ fn handle_terrain_painting(
     };
 
     // Get cursor position in window
-    let Some(cursor_pos) = window.cursor_position() else {
+    let Some(cursor_pos) = window.physical_cursor_position() else {
         paint_drag_state.reset();
         return;
     };
