@@ -31,7 +31,8 @@ use entities::{
     spawn_snail, spawn_tree_spirit, sync_world_render_transform, update_animation_from_direction,
     update_direction_from_velocity, update_guardian_animation_from_state, update_roaming_behavior,
     update_state_from_velocity, update_tree_growth, update_tree_spawning, update_winding_path,
-    Direction, Position, TreeVariant, Velocity, WorldRenderDepth,
+    Direction, ForestGuardian, Human, Position, Snail, TreeSpirit, TreeVariant, VariantTree,
+    Velocity, WorldRenderDepth,
 };
 use map::MapPlugin;
 use tiles::constants::{LAYER_GROUND, TILE_DIRT, TILE_GRASS, TILE_WORLD_SIZE};
@@ -50,6 +51,10 @@ const STYLIZED_UI_TEXTURE_PATH: &str = "ui/Stylized_UI.png";
 const BLOOM_POOL_SIZE: f32 = 64.0;
 const BLOOM_HALO_EXTRA_SIZE: f32 = 28.0;
 const BLOOM_HALO_DURATION: f32 = 0.35;
+const WORLD_CLICK_HALO_EXTRA_SIZE: f32 = 28.0;
+const WORLD_CLICK_HALO_PADDING: f32 = 12.0;
+const WORLD_ENTITY_CLICK_PADDING: f32 = 6.0;
+const WORLD_CLICK_HALO_DEPTH_OFFSET: f32 = 0.001;
 
 // Camera zoom configuration
 const ZOOM_MIN: f32 = 0.5; // Max zoom in (smaller = more zoomed in)
@@ -168,6 +173,15 @@ struct BloomPoolSelectionHalo;
 #[derive(Component)]
 struct BloomHaloPulse {
     timer: Timer,
+}
+
+#[derive(Component)]
+struct WorldClickHalo;
+
+#[derive(Component)]
+struct WorldClickHaloPulse {
+    timer: Timer,
+    base_diameter: f32,
 }
 
 // Entity type identifier for buttons
@@ -665,6 +679,7 @@ fn main() {
                 update_bloom_pool,
                 update_bloom_selection_halo,
                 animate_bloom_halo,
+                animate_world_click_halo,
                 pulse_bloom_halo_on_world_click,
                 handle_exit_world_button_interaction,
                 handle_exit_to_main_menu_button_interaction,
@@ -1719,6 +1734,121 @@ fn point_in_ui_node(
         && (0.0..=computed_node.size.y).contains(&local_point.y)
 }
 
+fn cursor_over_blocking_ui(
+    cursor: Vec2,
+    ui_nodes: &Query<
+        (
+            &ComputedNode,
+            &UiGlobalTransform,
+            &Node,
+            Option<&Visibility>,
+            Option<&InheritedVisibility>,
+        ),
+        With<Node>,
+    >,
+) -> bool {
+    for (computed_node, transform, node, visibility, inherited_visibility) in ui_nodes.iter() {
+        if node.display == Display::None {
+            continue;
+        }
+
+        if let Some(visibility) = visibility {
+            if *visibility == Visibility::Hidden {
+                continue;
+            }
+        }
+
+        if let Some(inherited_visibility) = inherited_visibility {
+            if !inherited_visibility.get() {
+                continue;
+            }
+        }
+
+        if computed_node.size().x <= 0.0 || computed_node.size().y <= 0.0 {
+            continue;
+        }
+
+        if point_in_ui_node(cursor, computed_node, transform) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn clicked_world_entity_screen_position(
+    world_pos: Vec2,
+    world_entities: &Query<
+        (
+            &Sprite,
+            Option<&Anchor>,
+            &Transform,
+            &Position,
+            &WorldRenderDepth,
+            Option<&Human>,
+            Option<&ForestGuardian>,
+            Option<&Snail>,
+            Option<&TreeSpirit>,
+            Option<&VariantTree>,
+        ),
+        (With<WorldRenderDepth>, Without<WorldClickHalo>),
+    >,
+    images: &Assets<Image>,
+    texture_atlas_layouts: &Assets<TextureAtlasLayout>,
+) -> Option<(Vec2, f32, f32)> {
+    let mut best_match: Option<(f32, f32, Vec2, f32)> = None;
+
+    for (
+        sprite,
+        anchor,
+        transform,
+        position,
+        render_depth,
+        human,
+        guardian,
+        snail,
+        tree_spirit,
+        variant_tree,
+    ) in world_entities.iter()
+    {
+        if human.is_none()
+            && guardian.is_none()
+            && snail.is_none()
+            && tree_spirit.is_none()
+            && variant_tree.is_none()
+        {
+            continue;
+        }
+
+        let Some((center, size)) =
+            sprite_world_bounds(sprite, anchor.copied(), transform, images, texture_atlas_layouts)
+        else {
+            continue;
+        };
+
+        let half_size = (size * 0.5) + Vec2::splat(WORLD_ENTITY_CLICK_PADDING);
+        let min = center - half_size;
+        let max = center + half_size;
+
+        if world_pos.x < min.x || world_pos.x > max.x || world_pos.y < min.y || world_pos.y > max.y
+        {
+            continue;
+        }
+
+        let score = world_pos.distance(center);
+        let render_z = render_depth.z_for_position(position);
+        let halo_diameter = size.max_element() + WORLD_CLICK_HALO_PADDING;
+
+        match best_match {
+            Some((best_z, best_score, _, _))
+                if render_z < best_z || (render_z == best_z && score >= best_score) => {}
+            _ => best_match = Some((render_z, score, center, halo_diameter)),
+        }
+    }
+
+    best_match.map(|(render_z, _, center, halo_diameter)| (center, render_z, halo_diameter))
+}
+
 fn set_draft_card_icon(
     image_node: &mut ImageNode,
     card: DraftCard,
@@ -2577,6 +2707,8 @@ fn update_draft_visuals(
 fn setup_world(
     mut commands: Commands,
     assets: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut color_materials: ResMut<Assets<ColorMaterial>>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
     save_state: Res<SaveGameState>,
     mut world_manager: ResMut<WorldManager>,
@@ -2594,6 +2726,21 @@ fn setup_world(
 
     // Spawn camera at origin
     commands.spawn((InGameCamera, Camera2d, Transform::from_xyz(0.0, 0.0, 999.0)));
+
+    let mut world_halo_timer = Timer::from_seconds(BLOOM_HALO_DURATION, TimerMode::Once);
+    world_halo_timer.pause();
+
+    commands.spawn((
+        WorldClickHalo,
+        WorldClickHaloPulse {
+            timer: world_halo_timer,
+            base_diameter: 0.0,
+        },
+        Mesh2d(meshes.add(Circle::new(0.5).to_ring(0.18))),
+        MeshMaterial2d(color_materials.add(Color::srgba(1.0, 0.92, 0.45, 0.0))),
+        Transform::from_xyz(0.0, 0.0, -1000.0),
+        Visibility::Hidden,
+    ));
 
     // Spawn forest guardian to the left
     spawn_forest_guardian(
@@ -3304,7 +3451,7 @@ fn update_bloom_pool(
 }
 
 fn handle_bloom_pool_click(
-    trigger: On<Pointer<Click>>,
+    trigger: On<Pointer<Press>>,
     button_query: Query<(), With<BloomPoolButton>>,
     mut bloom_selection: ResMut<BloomSelection>,
     mut placement_mode: ResMut<PlacementMode>,
@@ -3312,6 +3459,10 @@ fn handle_bloom_pool_click(
     mut halo_query: Query<&mut BloomHaloPulse, With<BloomPoolHalo>>,
     children_query: Query<&Children>,
 ) {
+    if trigger.event().button != PointerButton::Primary {
+        return;
+    }
+
     if button_query.get(trigger.entity).is_err() {
         return;
     }
@@ -3359,17 +3510,61 @@ fn update_bloom_selection_halo(
 fn pulse_bloom_halo_on_world_click(
     bloom_selection: Res<BloomSelection>,
     mouse_button: Res<ButtonInput<MouseButton>>,
-    ui_query: Query<&Interaction, With<Button>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    images: Res<Assets<Image>>,
+    texture_atlas_layouts: Res<Assets<TextureAtlasLayout>>,
+    world_entities: Query<
+        (
+            &Sprite,
+            Option<&Anchor>,
+            &Transform,
+            &Position,
+            &WorldRenderDepth,
+            Option<&Human>,
+            Option<&ForestGuardian>,
+            Option<&Snail>,
+            Option<&TreeSpirit>,
+            Option<&VariantTree>,
+        ),
+        (With<WorldRenderDepth>, Without<WorldClickHalo>),
+    >,
     mut halo_query: Query<&mut BloomHaloPulse, With<BloomPoolHalo>>,
+    mut ui_param_set: ParamSet<(
+        Query<
+            (
+                &ComputedNode,
+                &UiGlobalTransform,
+                &Node,
+                Option<&Visibility>,
+                Option<&InheritedVisibility>,
+            ),
+            With<Node>,
+        >,
+        Query<
+            (
+                &mut WorldClickHaloPulse,
+                &mut Transform,
+                &mut Visibility,
+            ),
+            With<WorldClickHalo>,
+        >,
+    )>,
 ) {
     if !bloom_selection.selected || !mouse_button.just_pressed(MouseButton::Left) {
         return;
     }
 
-    for interaction in ui_query.iter() {
-        if *interaction == Interaction::Pressed || *interaction == Interaction::Hovered {
-            return;
-        }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+
+    if cursor_over_blocking_ui(cursor, &ui_param_set.p0()) {
+        return;
     }
 
     let Ok(mut pulse) = halo_query.single_mut() else {
@@ -3378,6 +3573,38 @@ fn pulse_bloom_halo_on_world_click(
 
     pulse.timer.reset();
     pulse.timer.unpause();
+
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
+
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor) else {
+        return;
+    };
+
+    let Some((world_center, render_z, halo_diameter)) = clicked_world_entity_screen_position(
+        world_pos,
+        &world_entities,
+        &images,
+        &texture_atlas_layouts,
+    ) else {
+        return;
+    };
+
+    let mut world_halo_query = ui_param_set.p1();
+    let Ok((mut world_pulse, mut world_halo_transform, mut visibility)) =
+        world_halo_query.single_mut()
+    else {
+        return;
+    };
+
+    world_halo_transform.translation =
+        Vec3::new(world_center.x, world_center.y, render_z - WORLD_CLICK_HALO_DEPTH_OFFSET);
+    world_halo_transform.scale = Vec3::splat(halo_diameter);
+    *visibility = Visibility::Visible;
+    world_pulse.base_diameter = halo_diameter;
+    world_pulse.timer.reset();
+    world_pulse.timer.unpause();
 }
 
 fn animate_bloom_halo(
@@ -3412,8 +3639,51 @@ fn animate_bloom_halo(
     }
 }
 
+fn animate_world_click_halo(
+    time: Res<Time>,
+    mut color_materials: ResMut<Assets<ColorMaterial>>,
+    mut halo_query: Query<
+        (
+            &mut WorldClickHaloPulse,
+            &mut Transform,
+            &MeshMaterial2d<ColorMaterial>,
+            &mut Visibility,
+        ),
+        With<WorldClickHalo>,
+    >,
+) {
+    for (mut pulse, mut transform, material, mut visibility) in &mut halo_query {
+        let Some(color_material) = color_materials.get_mut(material) else {
+            continue;
+        };
+
+        if pulse.timer.is_paused() {
+            *visibility = Visibility::Hidden;
+            color_material.color = Color::srgba(1.0, 0.92, 0.45, 0.0);
+            continue;
+        }
+
+        pulse.timer.tick(time.delta());
+
+        if pulse.timer.is_finished() {
+            pulse.timer.pause();
+            *visibility = Visibility::Hidden;
+            color_material.color = Color::srgba(1.0, 0.92, 0.45, 0.0);
+            continue;
+        }
+
+        let progress = pulse.timer.elapsed_secs() / BLOOM_HALO_DURATION;
+        let size = pulse.base_diameter + WORLD_CLICK_HALO_EXTRA_SIZE * progress;
+        let alpha = (1.0 - progress) * 0.2;
+
+        *visibility = Visibility::Visible;
+        transform.scale = Vec3::splat(size);
+        color_material.color = Color::srgba(1.0, 0.92, 0.45, alpha);
+    }
+}
+
 fn button_interaction(
-    trigger: On<Pointer<Click>>,
+    trigger: On<Pointer<Press>>,
     mut param_set: ParamSet<(
         Query<(&EntityType, Option<&GuardianButton>), With<Button>>,
         Query<(&mut EntityType, &Children), With<GuardianButton>>,
@@ -3425,6 +3695,10 @@ fn button_interaction(
     mut image_query: Query<&mut ImageNode>,
     assets: Res<AssetServer>,
 ) {
+    if trigger.event().button != PointerButton::Primary {
+        return;
+    }
+
     // First, get the clicked button's info
     let button_info = param_set
         .p0()
@@ -3500,7 +3774,7 @@ fn guardian_button_right_click(
 }
 
 fn terrain_button_interaction(
-    trigger: On<Pointer<Click>>,
+    trigger: On<Pointer<Press>>,
     mut param_set: ParamSet<(
         Query<(&TerrainType, Option<&TerrainButton>), With<Button>>,
         Query<(&mut TerrainType, &Children), With<TerrainButton>>,
@@ -3511,6 +3785,10 @@ fn terrain_button_interaction(
     mut submenu_query: Query<&mut Node, With<TerrainSubmenu>>,
     mut image_query: Query<&mut ImageNode>,
 ) {
+    if trigger.event().button != PointerButton::Primary {
+        return;
+    }
+
     // First, get the clicked button's info
     let button_info = param_set
         .p0()
@@ -3661,7 +3939,16 @@ fn handle_entity_placement(
     mouse_button: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform, &Projection), With<Camera2d>>,
-    ui_query: Query<&Interaction, With<Button>>,
+    ui_nodes: Query<
+        (
+            &ComputedNode,
+            &UiGlobalTransform,
+            &Node,
+            Option<&Visibility>,
+            Option<&InheritedVisibility>,
+        ),
+        With<Node>,
+    >,
     mut bloom: ResMut<Bloom>,
     mut commands: Commands,
     assets: Res<AssetServer>,
@@ -3682,13 +3969,6 @@ fn handle_entity_placement(
         return;
     }
 
-    // Don't spawn entities if cursor is over any UI element
-    for interaction in ui_query.iter() {
-        if *interaction == Interaction::Pressed || *interaction == Interaction::Hovered {
-            return;
-        }
-    }
-
     // Get the primary window
     let Ok(window) = windows.single() else {
         return;
@@ -3698,6 +3978,10 @@ fn handle_entity_placement(
     let Some(cursor_pos) = window.cursor_position() else {
         return;
     };
+
+    if cursor_over_blocking_ui(cursor_pos, &ui_nodes) {
+        return;
+    }
 
     // Get camera components
     let Ok((camera, camera_transform, _projection)) = camera_query.single() else {
@@ -3746,7 +4030,16 @@ fn handle_terrain_painting(
     mouse_button: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
-    ui_query: Query<&Interaction, With<Button>>,
+    ui_nodes: Query<
+        (
+            &ComputedNode,
+            &UiGlobalTransform,
+            &Node,
+            Option<&Visibility>,
+            Option<&InheritedVisibility>,
+        ),
+        With<Node>,
+    >,
     mut paint_drag_state: ResMut<PaintDragState>,
     mut world_manager: ResMut<WorldManager>,
 ) {
@@ -3760,14 +4053,6 @@ fn handle_terrain_painting(
         return;
     };
 
-    // Don't paint terrain if cursor is over any UI element
-    for interaction in ui_query.iter() {
-        if *interaction == Interaction::Pressed || *interaction == Interaction::Hovered {
-            paint_drag_state.reset();
-            return;
-        }
-    }
-
     // Get the primary window
     let Ok(window) = windows.single() else {
         paint_drag_state.reset();
@@ -3779,6 +4064,11 @@ fn handle_terrain_painting(
         paint_drag_state.reset();
         return;
     };
+
+    if cursor_over_blocking_ui(cursor_pos, &ui_nodes) {
+        paint_drag_state.reset();
+        return;
+    }
 
     // Get camera components
     let Ok((camera, camera_transform)) = camera_query.single() else {
@@ -4374,6 +4664,20 @@ fn sprite_debug_size(
     images
         .get(&sprite.image)
         .map(|image| image.size().as_vec2())
+}
+
+fn sprite_world_bounds(
+    sprite: &Sprite,
+    anchor: Option<Anchor>,
+    transform: &Transform,
+    images: &Assets<Image>,
+    texture_atlas_layouts: &Assets<TextureAtlasLayout>,
+) -> Option<(Vec2, Vec2)> {
+    let base_size = sprite_debug_size(sprite, images, texture_atlas_layouts)?;
+    let world_size = base_size * transform.scale.truncate().abs();
+    let anchor = anchor.unwrap_or_default();
+    let center = transform.translation.truncate() - anchor.as_vec() * world_size;
+    Some((center, world_size))
 }
 
 /// System to reset the world map when 'R' key is pressed
