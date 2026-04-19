@@ -4127,13 +4127,17 @@ fn pulse_bloom_halo_on_world_click(
         return;
     };
 
-    let Some(cursor) = window.physical_cursor_position() else {
+    let Some(ui_cursor) = window.physical_cursor_position() else {
         return;
     };
 
-    if cursor_over_blocking_ui(cursor, &ui_param_set.p0()) {
+    if cursor_over_blocking_ui(ui_cursor, &ui_param_set.p0()) {
         return;
     }
+
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
 
     let Ok(mut pulse) = halo_query.single_mut() else {
         return;
@@ -4549,13 +4553,17 @@ fn handle_entity_placement(
     };
 
     // Get cursor position in window
-    let Some(cursor_pos) = window.physical_cursor_position() else {
+    let Some(ui_cursor_pos) = window.physical_cursor_position() else {
         return;
     };
 
-    if cursor_over_blocking_ui(cursor_pos, &ui_nodes) {
+    if cursor_over_blocking_ui(ui_cursor_pos, &ui_nodes) {
         return;
     }
+
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
 
     // Get camera components
     let Ok((camera, camera_transform, _projection)) = camera_query.single() else {
@@ -4634,15 +4642,20 @@ fn handle_terrain_painting(
     };
 
     // Get cursor position in window
-    let Some(cursor_pos) = window.physical_cursor_position() else {
+    let Some(ui_cursor_pos) = window.physical_cursor_position() else {
         paint_drag_state.reset();
         return;
     };
 
-    if cursor_over_blocking_ui(cursor_pos, &ui_nodes) {
+    if cursor_over_blocking_ui(ui_cursor_pos, &ui_nodes) {
         paint_drag_state.reset();
         return;
     }
+
+    let Some(cursor_pos) = window.cursor_position() else {
+        paint_drag_state.reset();
+        return;
+    };
 
     // Get camera components
     let Ok((camera, camera_transform)) = camera_query.single() else {
