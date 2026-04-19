@@ -21,11 +21,15 @@ pub enum AppState {
     InGame,
 }
 
+mod draft;
 mod entities;
 mod map;
 mod tiles;
 mod world;
 
+use draft::cards::{
+    label_plate_height, set_icon as set_draft_card_icon, DraftCard, ALL_DRAFT_CARDS,
+};
 use entities::{
     animate_sprite, apply_velocity, snail_dirt_trail, spawn_forest_guardian, spawn_human,
     spawn_snail, spawn_tree_spirit, sync_world_render_transform, update_animation_from_direction,
@@ -67,12 +71,9 @@ const BASE_PAN_SPEED: f32 = 200.0; // Base speed for panning when at minimum zoo
 const MAIN_MENU_UI_TEXTURE_PATH: &str = "ui/Classic_UI_Only.png";
 const DRAFT_CARD_FRAME_TEXTURE_PATH: &str = "ui/Card_Frame_40x48.png";
 const DRAFT_NAME_PLATE_TEXTURE_PATH: &str = "ui/Plate_Tileset_8x8.png";
-const DRAFT_ISLAND_TEXTURE_PATH: &str = "ui/New_Hills_forgotten_plains.png";
 const DRAFT_CARD_FRAME_TILE_SIZE: UVec2 = UVec2::new(40, 48);
 const DRAFT_CARD_FRAME_COLUMNS: u32 = 2;
 const DRAFT_CARD_FRAME_ROWS: u32 = 4;
-const DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX: usize = 0;
-const DRAFT_CARD_FRAME_BRONZE_RED_INDEX: usize = 1;
 const DRAFT_MAX_COLUMNS: usize = 5;
 const DRAFT_MAX_ROWS: usize = 5;
 const DRAFT_GRID_SLOT_WIDTH: f32 = 132.0;
@@ -463,30 +464,6 @@ struct MainMenuButtonPressState {
     armed: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DraftCard {
-    Human,
-    Guardian,
-    Snail,
-    Grass,
-    Dirt,
-    Island,
-}
-
-impl DraftCard {
-    fn unlocks_next_row(self) -> bool {
-        matches!(self, Self::Island)
-    }
-
-    fn frame_index(self) -> usize {
-        if self.unlocks_next_row() {
-            DRAFT_CARD_FRAME_BRONZE_RED_INDEX
-        } else {
-            DRAFT_CARD_FRAME_BRONZE_BLUE_INDEX
-        }
-    }
-}
-
 #[derive(Resource, Clone, Debug)]
 struct Bloom {
     current: u16,
@@ -536,6 +513,12 @@ struct DraftBoard {
     cells: [[Option<DraftCard>; DRAFT_MAX_ROWS]; DRAFT_MAX_COLUMNS],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DraftCellPosition {
+    column: usize,
+    row: usize,
+}
+
 impl Default for DraftBoard {
     fn default() -> Self {
         Self {
@@ -563,11 +546,33 @@ impl DraftBoard {
             .flatten()
     }
 
+    fn card_at_with_omission(
+        &self,
+        column: usize,
+        row: usize,
+        omitted: Option<DraftCellPosition>,
+    ) -> Option<DraftCard> {
+        if omitted == Some(DraftCellPosition { column, row }) {
+            None
+        } else {
+            self.card_at(column, row)
+        }
+    }
+
     fn is_column_unlocked(&self, column: usize) -> bool {
         column < self.available_columns()
     }
 
     fn is_row_unlocked(&self, column: usize, row: usize) -> bool {
+        self.is_row_unlocked_with_omission(column, row, None)
+    }
+
+    fn is_row_unlocked_with_omission(
+        &self,
+        column: usize,
+        row: usize,
+        omitted: Option<DraftCellPosition>,
+    ) -> bool {
         if !self.is_column_unlocked(column) || row >= DRAFT_MAX_ROWS {
             return false;
         }
@@ -576,14 +581,23 @@ impl DraftBoard {
             return true;
         }
 
-        self.card_at(column, row - 1)
+        self.card_at_with_omission(column, row - 1, omitted)
             .map(DraftCard::unlocks_next_row)
             .unwrap_or(false)
-            && self.is_row_unlocked(column, row - 1)
+            && self.is_row_unlocked_with_omission(column, row - 1, omitted)
     }
 
     fn can_place(&self, column: usize, row: usize) -> bool {
-        self.is_row_unlocked(column, row)
+        self.can_place_with_omission(column, row, None)
+    }
+
+    fn can_place_with_omission(
+        &self,
+        column: usize,
+        row: usize,
+        omitted: Option<DraftCellPosition>,
+    ) -> bool {
+        self.is_row_unlocked_with_omission(column, row, omitted)
     }
 
     fn place_card(&mut self, column: usize, row: usize, card: DraftCard) -> bool {
@@ -594,6 +608,18 @@ impl DraftBoard {
         self.cells[column][row] = Some(card);
         self.clear_locked_rows_in_column(column);
         true
+    }
+
+    fn remove_card(&mut self, column: usize, row: usize) -> Option<DraftCard> {
+        let card = self
+            .cells
+            .get_mut(column)
+            .and_then(|rows| rows.get_mut(row))
+            .and_then(Option::take);
+        if card.is_some() {
+            self.clear_locked_rows_in_column(column);
+        }
+        card
     }
 
     fn clear_locked_rows_in_column(&mut self, column: usize) {
@@ -612,6 +638,7 @@ impl DraftBoard {
 #[derive(Resource, Default, Clone, Debug)]
 struct DraftDragState {
     active_card: Option<DraftCard>,
+    source_cell: Option<DraftCellPosition>,
     hovered_cell: Option<usize>,
     cursor_pos: Option<Vec2>,
 }
@@ -1795,25 +1822,6 @@ fn activate_world(
     Ok(())
 }
 
-fn draft_card_label(card: DraftCard) -> &'static str {
-    match card {
-        DraftCard::Human => "Human",
-        DraftCard::Guardian => "Guardian",
-        DraftCard::Snail => "Snail",
-        DraftCard::Grass => "Grass",
-        DraftCard::Dirt => "Dirt",
-        DraftCard::Island => "Island Card",
-    }
-}
-
-fn draft_card_label_plate_height(label: &str) -> f32 {
-    match label.lines().count() {
-        0 | 1 => 24.0,
-        2 => 40.0,
-        _ => 56.0,
-    }
-}
-
 fn point_in_ui_node(
     point: Vec2,
     computed_node: &ComputedNode,
@@ -1947,97 +1955,6 @@ fn clicked_world_entity_screen_position(
     best_match.map(|(render_z, _, center, halo_diameter)| (center, render_z, halo_diameter))
 }
 
-fn set_draft_card_icon(
-    image_node: &mut ImageNode,
-    card: DraftCard,
-    assets: Option<&AssetServer>,
-    texture_atlas_layouts: Option<&mut Assets<TextureAtlasLayout>>,
-) {
-    let Some(assets) = assets else {
-        image_node.image = Handle::default();
-        image_node.texture_atlas = None;
-        return;
-    };
-
-    match card {
-        DraftCard::Human => {
-            image_node.image = assets.load("characters/human_walk.png");
-            image_node.rect = None;
-            image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
-                layout: layouts.add(TextureAtlasLayout::from_grid(
-                    UVec2::splat(32),
-                    4,
-                    4,
-                    None,
-                    None,
-                )),
-                index: 0,
-            });
-        }
-        DraftCard::Guardian => {
-            image_node.image = assets.load("creatures/forest_guardians/oak_guardian_idle.png");
-            image_node.rect = None;
-            image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
-                layout: layouts.add(TextureAtlasLayout::from_grid(
-                    UVec2::splat(32),
-                    8,
-                    4,
-                    None,
-                    None,
-                )),
-                index: 0,
-            });
-        }
-        DraftCard::Snail => {
-            image_node.image = assets.load("creatures/snail/snail_crawl.png");
-            image_node.rect = None;
-            image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
-                layout: layouts.add(TextureAtlasLayout::from_grid(
-                    UVec2::splat(32),
-                    4,
-                    4,
-                    None,
-                    None,
-                )),
-                index: 0,
-            });
-        }
-        DraftCard::Grass => {
-            image_node.image = assets.load("tilesets/terrain_array_ui.png");
-            image_node.rect = None;
-            image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
-                layout: layouts.add(TextureAtlasLayout::from_grid(
-                    UVec2::splat(8),
-                    1,
-                    2,
-                    None,
-                    None,
-                )),
-                index: 0,
-            });
-        }
-        DraftCard::Dirt => {
-            image_node.image = assets.load("tilesets/terrain_array_ui.png");
-            image_node.rect = None;
-            image_node.texture_atlas = texture_atlas_layouts.map(|layouts| TextureAtlas {
-                layout: layouts.add(TextureAtlasLayout::from_grid(
-                    UVec2::splat(8),
-                    1,
-                    2,
-                    None,
-                    None,
-                )),
-                index: 1,
-            });
-        }
-        DraftCard::Island => {
-            image_node.image = assets.load(DRAFT_ISLAND_TEXTURE_PATH);
-            image_node.rect = Some(Rect::new(16.0, 8.0, 40.0, 32.0));
-            image_node.texture_atlas = None;
-        }
-    }
-}
-
 fn setup_draft_setup(
     mut commands: Commands,
     assets: Option<Res<AssetServer>>,
@@ -2056,6 +1973,7 @@ fn setup_draft_setup(
         .unwrap_or(1);
     draft_board.reset(available_columns);
     draft_drag_state.active_card = None;
+    draft_drag_state.source_cell = None;
     draft_drag_state.hovered_cell = None;
     draft_drag_state.cursor_pos = None;
 
@@ -2148,7 +2066,7 @@ fn setup_draft_setup(
                         ..default()
                     },
                     Text::new(
-                        "Drag cards into unlocked columns. Island Cards unlock the row below.",
+                        "Drag cards into unlocked columns. Drag placed cards to move or remove them. Island Cards unlock the row below.",
                     ),
                     TextFont {
                         font_size: 16.0,
@@ -2280,16 +2198,9 @@ fn setup_draft_setup(
                         ..default()
                     },))
                     .with_children(|tray| {
-                        for card in [
-                            DraftCard::Human,
-                            DraftCard::Guardian,
-                            DraftCard::Snail,
-                            DraftCard::Grass,
-                            DraftCard::Dirt,
-                            DraftCard::Island,
-                        ] {
-                            let label = draft_card_label(card);
-                            let label_plate_height = draft_card_label_plate_height(label);
+                        for card in ALL_DRAFT_CARDS {
+                            let label = card.label();
+                            let label_plate_height = label_plate_height(label);
                             tray.spawn((
                                 Button,
                                 DraftTrayCard,
@@ -2571,6 +2482,7 @@ fn cleanup_draft_setup(
     mut draft_drag_state: ResMut<DraftDragState>,
 ) {
     draft_drag_state.active_card = None;
+    draft_drag_state.source_cell = None;
     draft_drag_state.hovered_cell = None;
     draft_drag_state.cursor_pos = None;
 
@@ -2592,8 +2504,10 @@ fn start_draft_card_drag(
         (&Interaction, &DraftCardTypeComponent),
         (Changed<Interaction>, With<DraftTrayCard>),
     >,
+    mut grid_cells: Query<(&Interaction, &DraftGridCell), Changed<Interaction>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mouse_button: Res<ButtonInput<MouseButton>>,
+    draft_board: Res<DraftBoard>,
     mut draft_drag_state: ResMut<DraftDragState>,
 ) {
     if !mouse_button.just_pressed(MouseButton::Left) {
@@ -2608,10 +2522,35 @@ fn start_draft_card_drag(
     for (interaction, card) in &mut tray_cards {
         if *interaction == Interaction::Pressed {
             draft_drag_state.active_card = Some(card.0);
+            draft_drag_state.source_cell = None;
             draft_drag_state.hovered_cell = None;
             draft_drag_state.cursor_pos = cursor_pos;
             break;
         }
+    }
+
+    if draft_drag_state.active_card.is_some() {
+        return;
+    }
+
+    for (interaction, cell) in &mut grid_cells {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+
+        let source_cell = DraftCellPosition {
+            column: cell.column,
+            row: cell.row,
+        };
+        let Some(card) = draft_board.card_at(source_cell.column, source_cell.row) else {
+            continue;
+        };
+
+        draft_drag_state.active_card = Some(card);
+        draft_drag_state.source_cell = Some(source_cell);
+        draft_drag_state.hovered_cell = None;
+        draft_drag_state.cursor_pos = cursor_pos;
+        break;
     }
 }
 
@@ -2648,7 +2587,13 @@ fn update_draft_hovered_cell(
         cells
             .iter()
             .find_map(|(cell, computed_node, transform, node)| {
-                if node.display == Display::None || !draft_board.can_place(cell.column, cell.row) {
+                if node.display == Display::None
+                    || !draft_board.can_place_with_omission(
+                        cell.column,
+                        cell.row,
+                        draft_drag_state.source_cell,
+                    )
+                {
                     return None;
                 }
 
@@ -2672,14 +2617,33 @@ fn handle_draft_card_drop(
         return;
     }
 
-    if let (Some(card), Some(index)) = (draft_drag_state.active_card, draft_drag_state.hovered_cell)
-    {
-        let column = index / DRAFT_MAX_ROWS;
-        let row = index % DRAFT_MAX_ROWS;
-        draft_board.place_card(column, row, card);
+    if let Some(card) = draft_drag_state.active_card {
+        match (draft_drag_state.source_cell, draft_drag_state.hovered_cell) {
+            (Some(source), Some(index)) => {
+                let target = DraftCellPosition {
+                    column: index / DRAFT_MAX_ROWS,
+                    row: index % DRAFT_MAX_ROWS,
+                };
+
+                if source != target {
+                    draft_board.remove_card(source.column, source.row);
+                    draft_board.place_card(target.column, target.row, card);
+                }
+            }
+            (Some(source), None) => {
+                draft_board.remove_card(source.column, source.row);
+            }
+            (None, Some(index)) => {
+                let column = index / DRAFT_MAX_ROWS;
+                let row = index % DRAFT_MAX_ROWS;
+                draft_board.place_card(column, row, card);
+            }
+            (None, None) => {}
+        }
     }
 
     draft_drag_state.active_card = None;
+    draft_drag_state.source_cell = None;
     draft_drag_state.hovered_cell = None;
     draft_drag_state.cursor_pos = None;
 }
@@ -2847,8 +2811,13 @@ fn update_draft_visuals(
     }
 
     for (cell, mut node, children, mut bg_color, mut border_color) in &mut cells {
-        let occupied = draft_board.card_at(cell.column, cell.row);
-        let is_visible = draft_board.is_row_unlocked(cell.column, cell.row);
+        let occupied =
+            draft_board.card_at_with_omission(cell.column, cell.row, draft_drag_state.source_cell);
+        let is_visible = draft_board.is_row_unlocked_with_omission(
+            cell.column,
+            cell.row,
+            draft_drag_state.source_cell,
+        );
         let cell_index = cell.column * DRAFT_MAX_ROWS + cell.row;
         let is_hovered = draft_drag_state.hovered_cell == Some(cell_index);
 
@@ -4563,6 +4532,32 @@ mod tests {
         assert!(board.place_card(0, 0, DraftCard::Island));
         assert!(board.is_row_unlocked(0, 1));
         assert_eq!(board.card_at(0, 1), None);
+    }
+
+    #[test]
+    fn removing_island_card_clears_cards_in_rows_it_no_longer_unlocks() {
+        let mut board = DraftBoard::default();
+
+        assert!(board.place_card(0, 0, DraftCard::Island));
+        assert!(board.place_card(0, 1, DraftCard::Human));
+
+        assert_eq!(board.remove_card(0, 0), Some(DraftCard::Island));
+        assert_eq!(board.card_at(0, 0), None);
+        assert!(!board.is_row_unlocked(0, 1));
+        assert_eq!(board.card_at(0, 1), None);
+    }
+
+    #[test]
+    fn dragged_source_cell_is_treated_as_empty_for_drop_validation() {
+        let mut board = DraftBoard::default();
+        board.reset(2);
+
+        assert!(board.place_card(0, 0, DraftCard::Island));
+        assert!(board.place_card(0, 1, DraftCard::Human));
+
+        let source = Some(DraftCellPosition { column: 0, row: 0 });
+        assert!(!board.can_place_with_omission(0, 1, source));
+        assert!(board.can_place_with_omission(1, 0, source));
     }
 
     #[test]
