@@ -1,7 +1,8 @@
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 /// World position component - tracks entity position in world space (pixels)
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Position {
     pub x: f32,
     pub y: f32,
@@ -24,7 +25,7 @@ impl Position {
 }
 
 /// Velocity component - movement speed in pixels per second
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Velocity {
     pub x: f32,
     pub y: f32,
@@ -45,7 +46,7 @@ impl Velocity {
 }
 
 /// Direction the entity is facing (for animation purposes)
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
     SouthEast = 0, // Row 0 in sprite sheets (down-right)
     SouthWest = 1, // Row 1 in sprite sheets (down-left)
@@ -86,7 +87,7 @@ impl Default for Direction {
 }
 
 /// Entity state machine
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntityState {
     Idle,
     Moving,
@@ -101,7 +102,7 @@ impl Default for EntityState {
 }
 
 /// Health component
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
@@ -138,7 +139,7 @@ impl Health {
 pub struct Human;
 
 /// Marker component for forest guardian creatures
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ForestGuardian {
     /// The tree variant this guardian is associated with
     pub variant: TreeVariant,
@@ -163,7 +164,7 @@ pub struct GuardianAnimations {
 }
 
 /// Component for entities that periodically spawn trees
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TreeSpawner {
     /// Time until next tree spawn (seconds)
     pub spawn_timer: f32,
@@ -223,7 +224,7 @@ pub struct RtsTree;
 pub struct VariantTree;
 
 /// High-level depth band for world sprites.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderStratum {
     Ground,
     Decoration,
@@ -243,7 +244,7 @@ impl RenderStratum {
 }
 
 /// Depth metadata for world sprites that should sort by their world position.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WorldRenderDepth {
     pub stratum: RenderStratum,
     pub depth_bias: f32,
@@ -273,7 +274,7 @@ impl WorldRenderDepth {
 }
 
 /// RTS tree variants (first two trees from Tileset_And_Props.png)
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RtsTreeVariant {
     /// Larger tree (x=21–42, y=18–43 in source)
     Large,
@@ -286,7 +287,7 @@ pub enum RtsTreeVariant {
 pub struct TreeSpirit;
 
 /// Growth stages for trees
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GrowthStage {
     Seed,       // Initial planted seed (small sprite)
     Sapling,    // Young sapling (medium sprite)
@@ -326,7 +327,7 @@ impl GrowthStage {
 }
 
 /// Component for trees that grow over time
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GrowingTree {
     /// Current growth stage
     pub stage: GrowthStage,
@@ -414,7 +415,7 @@ impl GrowingTree {
 }
 
 /// Tree variants available
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TreeVariant {
     Oak,
     Birch,
@@ -423,7 +424,7 @@ pub enum TreeVariant {
     Willow,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VariantTreeAppearance {
     Original,
     Variation1,
@@ -544,7 +545,7 @@ impl TreeVariant {
 }
 
 /// Roaming behavior - makes entities roam within a fixed radius of their spawn point
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RoamingBehavior {
     /// The center point to roam around (usually spawn position)
     pub home: Position,
@@ -620,7 +621,7 @@ impl RoamingBehavior {
 }
 
 /// Winding path behavior - makes entities move in long, meandering paths
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindingPath {
     /// Current direction angle in radians
     pub current_angle: f32,

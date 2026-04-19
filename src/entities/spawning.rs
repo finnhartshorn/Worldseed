@@ -1,7 +1,8 @@
 use super::{
-    Direction, EntityBundle, EntityState, ForestGuardian, GrowingTree, GuardianAnimations, Human,
-    Position, RenderStratum, RoamingBehavior, RtsTree, RtsTreeVariant, Snail, TreeSpawner,
-    TreeSpirit, TreeVariant, VariantTree, VariantTreeAppearance, WindingPath, WorldRenderDepth,
+    Direction, EntityBundle, EntityState, ForestGuardian, GrowingTree, GuardianAnimations, Health,
+    Human, Position, RenderStratum, RoamingBehavior, RtsTree, RtsTreeVariant, Snail, TreeSpawner,
+    TreeSpirit, TreeVariant, VariantTree, VariantTreeAppearance, Velocity, WindingPath,
+    WorldRenderDepth,
 };
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
@@ -156,6 +157,29 @@ impl AnimationTimer {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SavedActorState {
+    pub position: Position,
+    pub velocity: Velocity,
+    pub direction: Direction,
+    pub state: EntityState,
+    pub health: Health,
+}
+
+fn entity_bundle_from_state(state: SavedActorState) -> EntityBundle {
+    EntityBundle {
+        position: state.position,
+        velocity: state.velocity,
+        direction: state.direction,
+        state: state.state,
+        health: state.health,
+    }
+}
+
+fn atlas_index_for_direction(direction: Direction, frames_per_direction: usize) -> usize {
+    direction.sprite_row() * frames_per_direction
+}
+
 /// Spawns a human unit at the given position
 pub fn spawn_human(
     commands: &mut Commands,
@@ -181,6 +205,36 @@ pub fn spawn_human(
             world_anchor(),
             Transform::from_xyz(position.x, position.y, 0.0),
             AnimationIndices::new(0, 3), // First row, 4 frames
+            AnimationTimer::from_fps(5.0),
+        ))
+        .id()
+}
+
+pub fn spawn_saved_human(
+    commands: &mut Commands,
+    actor: SavedActorState,
+    assets: &Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+) -> Entity {
+    let texture = assets.load("characters/human_walk.png");
+    let texture_atlas_layout = human_texture_atlas_layout(texture_atlas_layouts);
+    let atlas_index = atlas_index_for_direction(actor.direction, 4);
+
+    commands
+        .spawn((
+            Human,
+            entity_bundle_from_state(actor),
+            WorldRenderDepth::with_bias(RenderStratum::WorldObject, PLAYER_DEPTH_BIAS),
+            Sprite::from_atlas_image(
+                texture,
+                TextureAtlas {
+                    layout: texture_atlas_layout,
+                    index: atlas_index,
+                },
+            ),
+            world_anchor(),
+            Transform::from_xyz(actor.position.x, actor.position.y, 0.0),
+            AnimationIndices::new(atlas_index, atlas_index + 3),
             AnimationTimer::from_fps(5.0),
         ))
         .id()
@@ -241,6 +295,63 @@ pub fn spawn_forest_guardian(
         .id()
 }
 
+pub fn spawn_saved_forest_guardian(
+    commands: &mut Commands,
+    actor: SavedActorState,
+    guardian: ForestGuardian,
+    roaming: RoamingBehavior,
+    tree_spawner: TreeSpawner,
+    assets: &Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+) -> Entity {
+    let variant = guardian.variant.as_str();
+    let idle_texture = assets.load(format!(
+        "creatures/forest_guardians/{}_guardian_idle.png",
+        variant
+    ));
+    let walk_texture = assets.load(format!(
+        "creatures/forest_guardians/{}_guardian_walk.png",
+        variant
+    ));
+    let idle_layout = guardian_texture_atlas_layout(texture_atlas_layouts);
+    let walk_layout = guardian_walk_texture_atlas_layout(texture_atlas_layouts);
+    let (texture, layout, frames_per_direction) = match actor.state {
+        EntityState::Moving => (walk_texture.clone(), walk_layout.clone(), 6),
+        _ => (idle_texture.clone(), idle_layout.clone(), 8),
+    };
+    let atlas_index = atlas_index_for_direction(actor.direction, frames_per_direction);
+
+    commands
+        .spawn((
+            guardian,
+            entity_bundle_from_state(actor),
+            roaming,
+            tree_spawner,
+            WorldRenderDepth::with_bias(RenderStratum::WorldObject, FOREST_GUARDIAN_DEPTH_BIAS),
+            Sprite::from_atlas_image(
+                texture,
+                TextureAtlas {
+                    layout,
+                    index: atlas_index,
+                },
+            ),
+            world_anchor(),
+            Transform::from_xyz(actor.position.x, actor.position.y, 0.0),
+            AnimationIndices::new(atlas_index, atlas_index + frames_per_direction - 1),
+            AnimationTimer::from_fps(4.0),
+            GuardianAnimations {
+                idle_texture,
+                idle_layout,
+                walk_texture,
+                walk_layout,
+                idle_frames: 8,
+                walk_frames: 6,
+                current_state: actor.state,
+            },
+        ))
+        .id()
+}
+
 /// Spawns a snail at the given position
 pub fn spawn_snail(
     commands: &mut Commands,
@@ -268,6 +379,39 @@ pub fn spawn_snail(
             Transform::from_xyz(position.x, position.y, 0.0).with_scale(Vec3::splat(4.0)), // 4x bigger
             AnimationIndices::new(0, 3),   // First row, 4 frames
             AnimationTimer::from_fps(2.0), // Slower animation at 2 FPS (~0.5s per frame)
+        ))
+        .id()
+}
+
+pub fn spawn_saved_snail(
+    commands: &mut Commands,
+    actor: SavedActorState,
+    winding_path: WindingPath,
+    assets: &Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+) -> Entity {
+    let texture = assets.load("creatures/snail/snail_crawl.png");
+    let texture_atlas_layout = snail_texture_atlas_layout(texture_atlas_layouts);
+    let atlas_index = atlas_index_for_direction(actor.direction, 4);
+
+    commands
+        .spawn((
+            Snail,
+            entity_bundle_from_state(actor),
+            winding_path,
+            WorldRenderDepth::with_bias(RenderStratum::WorldObject, SNAIL_DEPTH_BIAS),
+            Sprite::from_atlas_image(
+                texture,
+                TextureAtlas {
+                    layout: texture_atlas_layout,
+                    index: atlas_index,
+                },
+            ),
+            world_anchor(),
+            Transform::from_xyz(actor.position.x, actor.position.y, 0.0)
+                .with_scale(Vec3::splat(4.0)),
+            AnimationIndices::new(atlas_index, atlas_index + 3),
+            AnimationTimer::from_fps(2.0),
         ))
         .id()
 }
@@ -311,6 +455,41 @@ pub fn spawn_tree_spirit(
             Transform::from_xyz(position.x, position.y, 0.0).with_scale(Vec3::splat(initial_scale)),
             AnimationIndices::new(0, 7), // First row, 8 frames (assuming same as guardians)
             AnimationTimer::from_fps(4.0), // Slow idle animation
+        ))
+        .id()
+}
+
+pub fn spawn_saved_tree_spirit(
+    commands: &mut Commands,
+    position: Position,
+    growing_tree: GrowingTree,
+    assets: &Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+) -> Entity {
+    let texture = assets.load(format!(
+        "creatures/tree_spirits/{}_spirit_idle.png",
+        growing_tree.variant.as_str()
+    ));
+    let texture_atlas_layout = tree_spirit_texture_atlas_layout(texture_atlas_layouts);
+
+    commands
+        .spawn((
+            TreeSpirit,
+            growing_tree,
+            Position::new(position.x, position.y),
+            WorldRenderDepth::with_bias(RenderStratum::WorldObject, TREE_SPIRIT_DEPTH_BIAS),
+            Sprite::from_atlas_image(
+                texture,
+                TextureAtlas {
+                    layout: texture_atlas_layout,
+                    index: 0,
+                },
+            ),
+            world_anchor(),
+            Transform::from_xyz(position.x, position.y, 0.0)
+                .with_scale(Vec3::splat(growing_tree.current_scale())),
+            AnimationIndices::new(0, 7),
+            AnimationTimer::from_fps(4.0),
         ))
         .id()
 }
@@ -411,6 +590,67 @@ pub fn spawn_variant_tree(
             Transform::from_xyz(position.x, position.y, 0.0).with_scale(Vec3::splat(initial_scale)),
         ))
         .id()
+}
+
+pub fn spawn_saved_variant_tree(
+    commands: &mut Commands,
+    position: Position,
+    growing_tree: GrowingTree,
+    assets: &Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+) -> Entity {
+    let sprite = sprite_for_saved_variant_tree(&growing_tree, assets, texture_atlas_layouts);
+    let scale = growing_tree.current_variant_tree_scale();
+
+    commands
+        .spawn((
+            VariantTree,
+            growing_tree,
+            Position::new(position.x, position.y),
+            WorldRenderDepth::with_bias(RenderStratum::WorldObject, VARIANT_TREE_DEPTH_BIAS),
+            sprite,
+            world_anchor(),
+            Transform::from_xyz(position.x, position.y, 0.0).with_scale(Vec3::splat(scale)),
+        ))
+        .id()
+}
+
+fn sprite_for_saved_variant_tree(
+    growing_tree: &GrowingTree,
+    assets: &Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+) -> Sprite {
+    if growing_tree.appearance.uses_shared_mature_sheet()
+        && matches!(
+            growing_tree.stage,
+            super::GrowthStage::YoungTree | super::GrowthStage::MatureTree
+        )
+    {
+        let texture = assets.load(
+            growing_tree
+                .variant
+                .shared_variation_sheet_path()
+                .expect("saved shared appearance should have a backing sheet"),
+        );
+        let layout = variant_tree_shared_variation_texture_atlas_layout(texture_atlas_layouts);
+        let index = (growing_tree.appearance.mature_row() * 4
+            + growing_tree
+                .variant
+                .shared_variation_column()
+                .expect("saved shared appearance should have a valid column"))
+            as usize;
+
+        Sprite::from_atlas_image(texture, TextureAtlas { layout, index })
+    } else {
+        let texture = assets.load(growing_tree.variant.growth_stage_asset_path());
+        let layout = variant_tree_growth_texture_atlas_layout(
+            texture_atlas_layouts,
+            growing_tree.variant.growth_stage_frame_size(),
+        );
+        let index = growing_tree.stage.frame_index();
+
+        Sprite::from_atlas_image(texture, TextureAtlas { layout, index })
+    }
 }
 
 /// Updates animation indices based on entity direction and state

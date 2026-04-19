@@ -54,12 +54,31 @@ struct LegacySaveSlotMetadata {
     last_played_at: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct CameraState {
+    pub x: f32,
+    pub y: f32,
+    pub zoom: f32,
+}
+
+#[derive(Deserialize)]
+struct LegacyWorldMetadata {
+    id: String,
+    display_name: String,
+    created_at: u64,
+    last_played_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct WorldMetadata {
     pub id: String,
     pub display_name: String,
     pub created_at: u64,
     pub last_played_at: u64,
+    #[serde(default)]
+    pub camera: Option<CameraState>,
+    #[serde(default)]
+    pub bloom: Option<u16>,
 }
 
 pub fn list_slots<P: AsRef<Path>>(root: P) -> Result<Vec<SaveSlotMetadata>, SaveGameError> {
@@ -112,7 +131,7 @@ pub fn list_worlds<P: AsRef<Path>>(
             continue;
         }
 
-        worlds.push(read_metadata(&meta_path)?);
+        worlds.push(read_world_metadata(&meta_path)?);
     }
 
     worlds.sort_by(|a, b| {
@@ -160,6 +179,8 @@ pub fn create_world<P: AsRef<Path>>(
         display_name: format!("World {}", worlds.len() + 1),
         created_at: now,
         last_played_at: now,
+        camera: None,
+        bloom: None,
     };
 
     let world_path = worlds_root.join(&world_id);
@@ -206,10 +227,55 @@ pub fn touch_world<P: AsRef<Path>>(
     world_id: &str,
 ) -> Result<(), SaveGameError> {
     let meta_path = world_path(root.as_ref(), slot_id, world_id).join(WORLD_META_FILE);
-    let mut metadata: WorldMetadata = read_metadata(&meta_path)?;
+    let mut metadata = read_world_metadata(&meta_path)?;
     metadata.last_played_at = unix_timestamp_secs();
     write_metadata(meta_path, &metadata)?;
     touch_slot(root, slot_id)
+}
+
+pub fn load_world_metadata_for_world_dir<P: AsRef<Path>>(
+    world_dir: P,
+) -> Result<Option<WorldMetadata>, SaveGameError> {
+    let Some(meta_path) = world_metadata_path_from_world_dir(world_dir.as_ref()) else {
+        return Ok(None);
+    };
+    if !meta_path.exists() {
+        return Ok(None);
+    }
+
+    Ok(Some(read_world_metadata(meta_path)?))
+}
+
+pub fn set_world_camera_for_world_dir<P: AsRef<Path>>(
+    world_dir: P,
+    camera: CameraState,
+) -> Result<(), SaveGameError> {
+    let Some(meta_path) = world_metadata_path_from_world_dir(world_dir.as_ref()) else {
+        return Ok(());
+    };
+    if !meta_path.exists() {
+        return Ok(());
+    }
+
+    let mut metadata = read_world_metadata(&meta_path)?;
+    metadata.camera = Some(camera);
+    write_metadata(meta_path, &metadata)
+}
+
+pub fn set_world_bloom_for_world_dir<P: AsRef<Path>>(
+    world_dir: P,
+    bloom: u16,
+) -> Result<(), SaveGameError> {
+    let Some(meta_path) = world_metadata_path_from_world_dir(world_dir.as_ref()) else {
+        return Ok(());
+    };
+    if !meta_path.exists() {
+        return Ok(());
+    }
+
+    let mut metadata = read_world_metadata(&meta_path)?;
+    metadata.bloom = Some(bloom);
+    write_metadata(meta_path, &metadata)
 }
 
 pub fn world_save_path<P: AsRef<Path>>(root: P, slot_id: &str, world_id: &str) -> PathBuf {
@@ -264,15 +330,6 @@ fn write_metadata<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> Result<()
     Ok(())
 }
 
-fn read_metadata<T: for<'de> Deserialize<'de>, P: AsRef<Path>>(
-    path: P,
-) -> Result<T, SaveGameError> {
-    let mut file = File::open(path)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bincode::deserialize(&bytes)?)
-}
-
 fn read_slot_metadata<P: AsRef<Path>>(path: P) -> Result<SaveSlotMetadata, SaveGameError> {
     let mut file = File::open(path)?;
     let mut bytes = Vec::new();
@@ -291,6 +348,31 @@ fn read_slot_metadata<P: AsRef<Path>>(path: P) -> Result<SaveSlotMetadata, SaveG
             })
         }
     }
+}
+
+fn read_world_metadata<P: AsRef<Path>>(path: P) -> Result<WorldMetadata, SaveGameError> {
+    let mut file = File::open(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+
+    match bincode::deserialize(&bytes) {
+        Ok(metadata) => Ok(metadata),
+        Err(_) => {
+            let legacy: LegacyWorldMetadata = bincode::deserialize(&bytes)?;
+            Ok(WorldMetadata {
+                id: legacy.id,
+                display_name: legacy.display_name,
+                created_at: legacy.created_at,
+                last_played_at: legacy.last_played_at,
+                camera: None,
+                bloom: None,
+            })
+        }
+    }
+}
+
+fn world_metadata_path_from_world_dir(world_dir: &Path) -> Option<PathBuf> {
+    world_dir.parent().map(|parent| parent.join(WORLD_META_FILE))
 }
 
 #[cfg(test)]
@@ -367,6 +449,89 @@ mod tests {
         let slots = list_slots(&root).expect("slots should list");
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].available_columns, 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn world_camera_persists_for_world_directory() {
+        let root = temp_root();
+        let slot = create_slot(&root).expect("slot should be created");
+        let world = create_world(&root, &slot.id).expect("world should be created");
+        let world_dir = world_save_path(&root, &slot.id, &world.id);
+
+        set_world_camera_for_world_dir(
+            &world_dir,
+            CameraState {
+                x: 144.0,
+                y: -72.5,
+                zoom: 1.6,
+            },
+        )
+        .expect("world camera should persist");
+
+        let metadata = load_world_metadata_for_world_dir(&world_dir)
+            .expect("world metadata should load")
+            .expect("world metadata should exist");
+        assert_eq!(
+            metadata.camera,
+            Some(CameraState {
+                x: 144.0,
+                y: -72.5,
+                zoom: 1.6,
+            })
+        );
+        assert_eq!(metadata.bloom, None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn world_bloom_persists_for_world_directory() {
+        let root = temp_root();
+        let slot = create_slot(&root).expect("slot should be created");
+        let world = create_world(&root, &slot.id).expect("world should be created");
+        let world_dir = world_save_path(&root, &slot.id, &world.id);
+
+        set_world_bloom_for_world_dir(&world_dir, 9).expect("world bloom should persist");
+
+        let metadata = load_world_metadata_for_world_dir(&world_dir)
+            .expect("world metadata should load")
+            .expect("world metadata should exist");
+        assert_eq!(metadata.bloom, Some(9));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_world_metadata_defaults_camera_to_none() {
+        #[derive(Serialize)]
+        struct LegacyWorldMetadata {
+            id: String,
+            display_name: String,
+            created_at: u64,
+            last_played_at: u64,
+        }
+
+        let root = temp_root();
+        let slot_id = "slot-legacy";
+        let world_id = "world-legacy";
+        let metadata = LegacyWorldMetadata {
+            id: world_id.to_string(),
+            display_name: "Legacy World".to_string(),
+            created_at: 1,
+            last_played_at: 2,
+        };
+
+        let world_dir = world_path(&root, slot_id, world_id);
+        fs::create_dir_all(world_dir.join("world/chunks")).expect("world dir should be created");
+        write_metadata(world_dir.join(WORLD_META_FILE), &metadata)
+            .expect("legacy metadata should write");
+
+        let worlds = list_worlds(&root, slot_id).expect("worlds should list");
+        assert_eq!(worlds.len(), 1);
+        assert_eq!(worlds[0].camera, None);
+        assert_eq!(worlds[0].bloom, None);
 
         let _ = fs::remove_dir_all(root);
     }

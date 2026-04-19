@@ -8,7 +8,10 @@ use bevy::{
     sprite_render::TilemapChunk,
     window::PrimaryWindow,
 };
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(States, Default, Clone, Eq, PartialEq, Debug, Hash)]
 pub enum AppState {
@@ -32,15 +35,21 @@ use draft::cards::{
 };
 use entities::{
     animate_sprite, apply_velocity, snail_dirt_trail, spawn_forest_guardian, spawn_human,
-    spawn_snail, spawn_tree_spirit, sync_world_render_transform, update_animation_from_direction,
-    update_direction_from_velocity, update_guardian_animation_from_state, update_roaming_behavior,
-    update_state_from_velocity, update_tree_growth, update_tree_spawning, update_winding_path,
-    Direction, ForestGuardian, Human, Position, Snail, TreeSpirit, TreeVariant, VariantTree,
-    Velocity, WorldRenderDepth,
+    spawn_saved_forest_guardian, spawn_saved_human, spawn_saved_snail, spawn_saved_tree_spirit,
+    spawn_saved_variant_tree, spawn_snail, spawn_tree_spirit, sync_world_render_transform,
+    update_animation_from_direction, update_direction_from_velocity,
+    update_guardian_animation_from_state, update_roaming_behavior, update_state_from_velocity,
+    update_tree_growth, update_tree_spawning, update_winding_path, Direction, ForestGuardian,
+    GrowingTree, Health, Human, Position, RoamingBehavior, SavedActorState, Snail, TreeSpawner,
+    TreeSpirit, TreeVariant, VariantTree, Velocity, WindingPath, WorldRenderDepth,
 };
 use map::MapPlugin;
 use tiles::constants::{LAYER_GROUND, TILE_DIRT, TILE_GRASS, TILE_WORLD_SIZE};
 use world::{
+    entities_save::{
+        self, SavedActor, SavedEntity, SavedForestGuardian, SavedGrowingTreeEntity, SavedSnail,
+        SavedWorldEntities,
+    },
     loader,
     savegame::{self, SaveSlotMetadata, WorldMetadata},
     WorldManager,
@@ -317,6 +326,15 @@ impl SaveNotification {
 // Marker component for save notification UI text
 #[derive(Component)]
 struct SaveNotificationText;
+
+#[derive(Resource, Deref, DerefMut)]
+struct EntityAutosaveTimer(Timer);
+
+impl Default for EntityAutosaveTimer {
+    fn default() -> Self {
+        Self(Timer::from_seconds(30.0, TimerMode::Repeating))
+    }
+}
 
 #[derive(Component)]
 struct InGameCamera;
@@ -707,6 +725,7 @@ fn main() {
         .add_plugins(MapPlugin)
         .init_resource::<WorldManager>()
         .init_resource::<loader::ChunkSaveTimer>()
+        .init_resource::<EntityAutosaveTimer>()
         .init_resource::<PlacementMode>()
         .init_resource::<PaintMode>()
         .init_resource::<PaintDragState>()
@@ -854,6 +873,7 @@ fn main() {
                 loader::unload_distant_chunks.after(loader::load_chunks_around_camera),
                 loader::apply_tile_modifications,
                 loader::autosave_dirty_chunks,
+                autosave_entities,
                 draw_snail_debug_bounds,
                 // Map reset
                 reset_world_map,
@@ -1227,8 +1247,42 @@ fn handle_exit_world_button_interaction(
     >,
     mut save_state: ResMut<SaveGameState>,
     mut world_manager: ResMut<WorldManager>,
-    mut save_notification: ResMut<SaveNotification>,
     mut escape_menu_state: ResMut<EscapeMenuState>,
+    camera_query: Query<(&Transform, &Projection), With<InGameCamera>>,
+    bloom: Option<Res<Bloom>>,
+    human_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: Query<(&Position, &GrowingTree), With<VariantTree>>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     for (interaction, mut press_state) in &mut interaction_query {
@@ -1236,7 +1290,17 @@ fn handle_exit_world_button_interaction(
             Interaction::Pressed => press_state.armed = true,
             Interaction::Hovered if press_state.armed => {
                 press_state.armed = false;
-                save_dirty_chunks(&mut world_manager, &mut save_notification);
+                save_world_snapshot(
+                    &mut world_manager,
+                    &camera_query,
+                    bloom.as_deref(),
+                    &human_query,
+                    &guardian_query,
+                    &snail_query,
+                    &tree_spirit_query,
+                    &variant_tree_query,
+                    None,
+                );
                 save_state.active_world_id = None;
                 save_state.refresh_worlds();
                 escape_menu_state.open = false;
@@ -1255,8 +1319,42 @@ fn handle_exit_to_main_menu_button_interaction(
     >,
     mut save_state: ResMut<SaveGameState>,
     mut world_manager: ResMut<WorldManager>,
-    mut save_notification: ResMut<SaveNotification>,
     mut escape_menu_state: ResMut<EscapeMenuState>,
+    camera_query: Query<(&Transform, &Projection), With<InGameCamera>>,
+    bloom: Option<Res<Bloom>>,
+    human_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: Query<(&Position, &GrowingTree), With<VariantTree>>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     for (interaction, mut press_state) in &mut interaction_query {
@@ -1264,7 +1362,17 @@ fn handle_exit_to_main_menu_button_interaction(
             Interaction::Pressed => press_state.armed = true,
             Interaction::Hovered if press_state.armed => {
                 press_state.armed = false;
-                save_dirty_chunks(&mut world_manager, &mut save_notification);
+                save_world_snapshot(
+                    &mut world_manager,
+                    &camera_query,
+                    bloom.as_deref(),
+                    &human_query,
+                    &guardian_query,
+                    &snail_query,
+                    &tree_spirit_query,
+                    &variant_tree_query,
+                    None,
+                );
                 save_state.active_slot_id = None;
                 save_state.active_world_id = None;
                 save_state.refresh_slots();
@@ -1284,7 +1392,41 @@ fn handle_quit_game_button_interaction(
         (Changed<Interaction>, With<QuitGameButton>),
     >,
     mut world_manager: ResMut<WorldManager>,
-    mut save_notification: ResMut<SaveNotification>,
+    camera_query: Query<(&Transform, &Projection), With<InGameCamera>>,
+    bloom: Option<Res<Bloom>>,
+    human_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: Query<(&Position, &GrowingTree), With<VariantTree>>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
     for (interaction, mut press_state) in &mut interaction_query {
@@ -1292,7 +1434,17 @@ fn handle_quit_game_button_interaction(
             Interaction::Pressed => press_state.armed = true,
             Interaction::Hovered if press_state.armed => {
                 press_state.armed = false;
-                save_dirty_chunks(&mut world_manager, &mut save_notification);
+                save_world_snapshot(
+                    &mut world_manager,
+                    &camera_query,
+                    bloom.as_deref(),
+                    &human_query,
+                    &guardian_query,
+                    &snail_query,
+                    &tree_spirit_query,
+                    &variant_tree_query,
+                    None,
+                );
                 app_exit.write(AppExit::Success);
             }
             Interaction::None => press_state.armed = false,
@@ -1820,6 +1972,176 @@ fn activate_world(
     world_manager.save_directory =
         savegame::world_save_path(&save_state.root_dir, slot_id, world_id);
     Ok(())
+}
+
+fn saved_actor(
+    position: &Position,
+    velocity: &Velocity,
+    direction: &Direction,
+    state: &entities::EntityState,
+    health: &Health,
+) -> SavedActor {
+    SavedActor {
+        position: *position,
+        velocity: *velocity,
+        direction: *direction,
+        state: *state,
+        health: *health,
+    }
+}
+
+fn collect_saved_world_entities(
+    human_query: &Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: &Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: &Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: &Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: &Query<(&Position, &GrowingTree), With<VariantTree>>,
+) -> SavedWorldEntities {
+    let mut entities = Vec::new();
+
+    for (position, velocity, direction, state, health) in human_query.iter() {
+        entities.push(SavedEntity::Human(saved_actor(
+            position, velocity, direction, state, health,
+        )));
+    }
+
+    for (position, velocity, direction, state, health, guardian, roaming, tree_spawner) in
+        guardian_query.iter()
+    {
+        entities.push(SavedEntity::ForestGuardian(SavedForestGuardian {
+            actor: saved_actor(position, velocity, direction, state, health),
+            guardian: *guardian,
+            roaming: *roaming,
+            tree_spawner: *tree_spawner,
+        }));
+    }
+
+    for (position, velocity, direction, state, health, winding_path) in snail_query.iter() {
+        entities.push(SavedEntity::Snail(SavedSnail {
+            actor: saved_actor(position, velocity, direction, state, health),
+            winding_path: winding_path.clone(),
+        }));
+    }
+
+    for (position, growing_tree) in tree_spirit_query.iter() {
+        entities.push(SavedEntity::TreeSpirit(SavedGrowingTreeEntity {
+            position: *position,
+            growing_tree: *growing_tree,
+        }));
+    }
+
+    for (position, growing_tree) in variant_tree_query.iter() {
+        entities.push(SavedEntity::VariantTree(SavedGrowingTreeEntity {
+            position: *position,
+            growing_tree: *growing_tree,
+        }));
+    }
+
+    SavedWorldEntities::new(entities)
+}
+
+fn spawn_saved_world_entities(
+    commands: &mut Commands,
+    assets: &Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+    saved_world: SavedWorldEntities,
+) {
+    for saved_entity in saved_world.entities {
+        match saved_entity {
+            SavedEntity::Human(actor) => {
+                spawn_saved_human(
+                    commands,
+                    SavedActorState {
+                        position: actor.position,
+                        velocity: actor.velocity,
+                        direction: actor.direction,
+                        state: actor.state,
+                        health: actor.health,
+                    },
+                    assets,
+                    texture_atlas_layouts,
+                );
+            }
+            SavedEntity::ForestGuardian(saved) => {
+                spawn_saved_forest_guardian(
+                    commands,
+                    SavedActorState {
+                        position: saved.actor.position,
+                        velocity: saved.actor.velocity,
+                        direction: saved.actor.direction,
+                        state: saved.actor.state,
+                        health: saved.actor.health,
+                    },
+                    saved.guardian,
+                    saved.roaming,
+                    saved.tree_spawner,
+                    assets,
+                    texture_atlas_layouts,
+                );
+            }
+            SavedEntity::Snail(saved) => {
+                spawn_saved_snail(
+                    commands,
+                    SavedActorState {
+                        position: saved.actor.position,
+                        velocity: saved.actor.velocity,
+                        direction: saved.actor.direction,
+                        state: saved.actor.state,
+                        health: saved.actor.health,
+                    },
+                    saved.winding_path,
+                    assets,
+                    texture_atlas_layouts,
+                );
+            }
+            SavedEntity::TreeSpirit(saved) => {
+                spawn_saved_tree_spirit(
+                    commands,
+                    saved.position,
+                    saved.growing_tree,
+                    assets,
+                    texture_atlas_layouts,
+                );
+            }
+            SavedEntity::VariantTree(saved) => {
+                spawn_saved_variant_tree(
+                    commands,
+                    saved.position,
+                    saved.growing_tree,
+                    assets,
+                    texture_atlas_layouts,
+                );
+            }
+        }
+    }
 }
 
 fn point_in_ui_node(
@@ -2910,6 +3232,7 @@ fn setup_world(
     save_state: Res<SaveGameState>,
     mut world_manager: ResMut<WorldManager>,
     mut escape_menu_state: ResMut<EscapeMenuState>,
+    mut bloom: ResMut<Bloom>,
 ) {
     escape_menu_state.open = false;
 
@@ -2921,8 +3244,32 @@ fn setup_world(
             savegame::world_save_path(&save_state.root_dir, slot_id, world_id);
     }
 
-    // Spawn camera at origin
-    commands.spawn((InGameCamera, Camera2d, Transform::from_xyz(0.0, 0.0, 999.0)));
+    let (saved_camera, saved_bloom) =
+        match savegame::load_world_metadata_for_world_dir(&world_manager.save_directory) {
+            Ok(Some(metadata)) => (metadata.camera, metadata.bloom),
+            Ok(None) => (None, None),
+            Err(err) => {
+                warn!("Failed to load world metadata: {err}");
+                (None, None)
+            }
+        };
+    let camera_translation = saved_camera
+        .map(|camera| Vec3::new(camera.x, camera.y, 999.0))
+        .unwrap_or(Vec3::new(0.0, 0.0, 999.0));
+    let camera_zoom = saved_camera
+        .map(|camera| camera.zoom.clamp(ZOOM_MIN, ZOOM_MAX))
+        .unwrap_or(1.0);
+    bloom.current = saved_bloom.unwrap_or(bloom.max).min(bloom.max);
+
+    commands.spawn((
+        InGameCamera,
+        Camera2d,
+        Transform::from_translation(camera_translation),
+        Projection::Orthographic(OrthographicProjection {
+            scale: camera_zoom,
+            ..OrthographicProjection::default_2d()
+        }),
+    ));
 
     let mut world_halo_timer = Timer::from_seconds(BLOOM_HALO_DURATION, TimerMode::Once);
     world_halo_timer.pause();
@@ -2939,34 +3286,66 @@ fn setup_world(
         Visibility::Hidden,
     ));
 
-    // Spawn forest guardian to the left
-    spawn_forest_guardian(
-        &mut commands,
-        Position::new(-100.0, 0.0),
-        "oak",
-        &assets,
-        &mut texture_atlas_layouts,
-    );
-
-    // Spawn snail to the right
-    spawn_snail(
-        &mut commands,
-        Position::new(100.0, 0.0),
-        &assets,
-        &mut texture_atlas_layouts,
-    );
-
-    // Spawn a test tree spirit near the origin - grows every 3 seconds per stage
-    spawn_tree_spirit(
-        &mut commands,
-        Position::new(0.0, 100.0),
-        TreeVariant::Oak,
-        3.0, // 3 seconds per growth stage
-        &assets,
-        &mut texture_atlas_layouts,
-    );
-
-    info!("World setup complete with entities using position and state components");
+    match entities_save::load_world_entities(&world_manager.save_directory) {
+        Ok(Some(saved_world)) => {
+            let entity_count = saved_world.entities.len();
+            spawn_saved_world_entities(
+                &mut commands,
+                &assets,
+                &mut texture_atlas_layouts,
+                saved_world,
+            );
+            info!("World setup complete with {entity_count} restored entities");
+        }
+        Ok(None) => {
+            spawn_forest_guardian(
+                &mut commands,
+                Position::new(-100.0, 0.0),
+                "oak",
+                &assets,
+                &mut texture_atlas_layouts,
+            );
+            spawn_snail(
+                &mut commands,
+                Position::new(100.0, 0.0),
+                &assets,
+                &mut texture_atlas_layouts,
+            );
+            spawn_tree_spirit(
+                &mut commands,
+                Position::new(0.0, 100.0),
+                TreeVariant::Oak,
+                3.0,
+                &assets,
+                &mut texture_atlas_layouts,
+            );
+            info!("World setup complete with default seeded entities");
+        }
+        Err(err) => {
+            error!("Failed to load saved world entities: {err}");
+            spawn_forest_guardian(
+                &mut commands,
+                Position::new(-100.0, 0.0),
+                "oak",
+                &assets,
+                &mut texture_atlas_layouts,
+            );
+            spawn_snail(
+                &mut commands,
+                Position::new(100.0, 0.0),
+                &assets,
+                &mut texture_atlas_layouts,
+            );
+            spawn_tree_spirit(
+                &mut commands,
+                Position::new(0.0, 100.0),
+                TreeVariant::Oak,
+                3.0,
+                &assets,
+                &mut texture_atlas_layouts,
+            );
+        }
+    }
 }
 
 /// Orthographic zoom avoids camera transform scaling issues with tilemap rendering.
@@ -4308,6 +4687,17 @@ fn world_to_tile_pos(world_pos: Vec2) -> IVec2 {
 mod tests {
     use super::*;
     use crate::entities::RenderStratum;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("worldseed-{prefix}-{unique}"));
+        let _ = fs::remove_dir_all(&root);
+        root
+    }
 
     #[test]
     fn world_to_tile_pos_handles_positive_and_negative_coordinates() {
@@ -4366,6 +4756,9 @@ mod tests {
             })
             .add_systems(Update, handle_new_game_button_interaction);
 
+        let temp_root = temp_root("test-new-game");
+        app.world_mut().resource_mut::<SaveGameState>().root_dir = temp_root.clone();
+
         app.update();
 
         let new_game_button = {
@@ -4402,6 +4795,8 @@ mod tests {
         };
         assert_eq!(menu_count, 0);
         assert_eq!(draft_root_count, 1);
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]
@@ -4637,11 +5032,15 @@ mod tests {
             .add_systems(OnExit(AppState::InGame), cleanup_in_game)
             .add_systems(Update, handle_exit_world_button_interaction);
 
+        let temp_root = temp_root("test-exit-world");
         {
             let mut save_state = app.world_mut().resource_mut::<SaveGameState>();
+            save_state.root_dir = temp_root.clone();
             save_state.active_slot_id = Some("slot-1".to_string());
             save_state.active_world_id = Some("world-1".to_string());
         }
+        app.world_mut().resource_mut::<WorldManager>().save_directory =
+            temp_root.join("world");
         app.world_mut().resource_mut::<EscapeMenuState>().open = true;
         app.world_mut().spawn((InGameCamera, Camera2d));
         app.world_mut().spawn(InGameUiRoot);
@@ -4706,6 +5105,8 @@ mod tests {
         assert_eq!(camera_count, 0);
         assert_eq!(ui_count, 0);
         assert_eq!(world_entity_count, 0);
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 }
 
@@ -4744,18 +5145,84 @@ fn setup_save_notification_ui(mut commands: Commands) {
 
 fn cleanup_in_game(
     mut commands: Commands,
-    in_game_cameras: Query<Entity, With<InGameCamera>>,
+    in_game_cameras: Query<(Entity, &Transform, &Projection), With<InGameCamera>>,
     in_game_ui_roots: Query<Entity, With<InGameUiRoot>>,
     world_entities: Query<Entity, With<WorldRenderDepth>>,
     chunk_entities: Query<Entity, With<TilemapChunk>>,
     mut world_manager: ResMut<WorldManager>,
-    mut placement_mode: ResMut<PlacementMode>,
-    mut paint_mode: ResMut<PaintMode>,
-    mut paint_drag_state: ResMut<PaintDragState>,
-    mut save_notification: ResMut<SaveNotification>,
-    mut escape_menu_state: ResMut<EscapeMenuState>,
+    bloom: Option<Res<Bloom>>,
+    human_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: Query<(&Position, &GrowingTree), With<VariantTree>>,
+    ui_state: (
+        ResMut<PlacementMode>,
+        ResMut<PaintMode>,
+        ResMut<PaintDragState>,
+        ResMut<SaveNotification>,
+        ResMut<EscapeMenuState>,
+    ),
 ) {
-    for entity in &in_game_cameras {
+    let (mut placement_mode, mut paint_mode, mut paint_drag_state, mut save_notification, mut escape_menu_state) =
+        ui_state;
+
+    if let Some((_, transform, projection)) = in_game_cameras.iter().next() {
+        save_world_camera(
+            &world_manager.save_directory,
+            savegame::CameraState {
+                x: transform.translation.x,
+                y: transform.translation.y,
+                zoom: match projection {
+                    Projection::Orthographic(ortho) => ortho.scale,
+                    _ => 1.0,
+                },
+            },
+        );
+    }
+    if let Some(bloom) = bloom.as_deref() {
+        save_world_bloom(&world_manager.save_directory, bloom.current);
+    }
+    save_dirty_chunks(&mut world_manager);
+    save_world_entities_only(
+        &world_manager.save_directory,
+        &human_query,
+        &guardian_query,
+        &snail_query,
+        &tree_spirit_query,
+        &variant_tree_query,
+        None,
+    );
+
+    for (entity, _, _) in &in_game_cameras {
         commands.entity(entity).despawn();
     }
 
@@ -4784,7 +5251,7 @@ fn cleanup_in_game(
     escape_menu_state.open = false;
 }
 
-fn save_dirty_chunks(world: &mut WorldManager, save_notification: &mut SaveNotification) {
+fn save_dirty_chunks(world: &mut WorldManager) {
     use world::serialization;
 
     let dirty_chunks = world.get_dirty_chunks();
@@ -4816,7 +5283,150 @@ fn save_dirty_chunks(world: &mut WorldManager, save_notification: &mut SaveNotif
         "Saved dirty chunks: {} saved, {} failed",
         saved_count, failed_count
     );
-    save_notification.show(2.0);
+}
+
+fn save_world_snapshot(
+    world: &mut WorldManager,
+    camera_query: &Query<(&Transform, &Projection), With<InGameCamera>>,
+    bloom: Option<&Bloom>,
+    human_query: &Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: &Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: &Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: &Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: &Query<(&Position, &GrowingTree), With<VariantTree>>,
+    save_notification: Option<&mut SaveNotification>,
+) {
+    if let Some(camera) = current_world_camera_state(camera_query) {
+        save_world_camera(&world.save_directory, camera);
+    }
+    if let Some(bloom) = bloom {
+        save_world_bloom(&world.save_directory, bloom.current);
+    }
+    save_dirty_chunks(world);
+    save_world_entities_only(
+        &world.save_directory,
+        human_query,
+        guardian_query,
+        snail_query,
+        tree_spirit_query,
+        variant_tree_query,
+        save_notification,
+    );
+}
+
+fn current_world_camera_state(
+    camera_query: &Query<(&Transform, &Projection), With<InGameCamera>>,
+) -> Option<savegame::CameraState> {
+    let Ok((transform, projection)) = camera_query.single() else {
+        return None;
+    };
+
+    Some(savegame::CameraState {
+        x: transform.translation.x,
+        y: transform.translation.y,
+        zoom: match projection {
+            Projection::Orthographic(ortho) => ortho.scale,
+            _ => 1.0,
+        },
+    })
+}
+
+fn save_world_camera(save_directory: &Path, camera: savegame::CameraState) {
+    if let Err(err) = savegame::set_world_camera_for_world_dir(save_directory, camera) {
+        error!("Failed to save world camera state: {err}");
+    }
+}
+
+fn save_world_bloom(save_directory: &Path, bloom: u16) {
+    if let Err(err) = savegame::set_world_bloom_for_world_dir(save_directory, bloom) {
+        error!("Failed to save world bloom state: {err}");
+    }
+}
+
+fn save_world_entities_only(
+    save_directory: &PathBuf,
+    human_query: &Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: &Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: &Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: &Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: &Query<(&Position, &GrowingTree), With<VariantTree>>,
+    save_notification: Option<&mut SaveNotification>,
+) {
+    let snapshot = collect_saved_world_entities(
+        human_query,
+        guardian_query,
+        snail_query,
+        tree_spirit_query,
+        variant_tree_query,
+    );
+
+    match entities_save::save_world_entities(save_directory, &snapshot) {
+        Ok(()) => {
+            info!("Saved {} world entities", snapshot.entities.len());
+            if let Some(save_notification) = save_notification {
+                save_notification.show(2.0);
+            }
+        }
+        Err(err) => {
+            error!("Failed to save world entities: {err}");
+        }
+    }
 }
 
 /// System to handle 's' key press and trigger manual save
@@ -4824,19 +5434,119 @@ fn handle_manual_save(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut save_notification: ResMut<SaveNotification>,
     mut world: ResMut<WorldManager>,
+    camera_query: Query<(&Transform, &Projection), With<InGameCamera>>,
+    bloom: Res<Bloom>,
+    human_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: Query<(&Position, &GrowingTree), With<VariantTree>>,
 ) {
     // Only trigger on 's' key press
     if !keyboard.just_pressed(KeyCode::KeyS) {
         return;
     }
 
-    if world.get_dirty_chunks().is_empty() {
-        info!("Manual save triggered but no dirty chunks to save");
+    info!("Manual save requested");
+    save_world_snapshot(
+        &mut world,
+        &camera_query,
+        Some(&bloom),
+        &human_query,
+        &guardian_query,
+        &snail_query,
+        &tree_spirit_query,
+        &variant_tree_query,
+        Some(&mut save_notification),
+    );
+}
+
+fn autosave_entities(
+    time: Res<Time>,
+    mut timer: ResMut<EntityAutosaveTimer>,
+    world: Res<WorldManager>,
+    camera_query: Query<(&Transform, &Projection), With<InGameCamera>>,
+    bloom: Res<Bloom>,
+    human_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: Query<(&Position, &GrowingTree), With<VariantTree>>,
+) {
+    timer.tick(time.delta());
+    if !timer.just_finished() {
         return;
     }
 
-    info!("Manual save requested");
-    save_dirty_chunks(&mut world, &mut save_notification);
+    if let Some(camera) = current_world_camera_state(&camera_query) {
+        save_world_camera(&world.save_directory, camera);
+    }
+    save_world_bloom(&world.save_directory, bloom.current);
+    save_world_entities_only(
+        &world.save_directory,
+        &human_query,
+        &guardian_query,
+        &snail_query,
+        &tree_spirit_query,
+        &variant_tree_query,
+        None,
+    );
 }
 
 /// System to update save notification visibility based on timer
