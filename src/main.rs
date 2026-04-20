@@ -63,6 +63,7 @@ const FOREST_GUARDIAN_SPRITE_OFFSET: f32 = 10.0;
 const SNAIL_SPRITE_OFFSET: f32 = 10.0;
 const SNAIL_SPRITE_OFFSET_X: f32 = 10.0;
 const STYLIZED_UI_TEXTURE_PATH: &str = "ui/Stylized_UI.png";
+const ICONS_UI_TEXTURE_PATH: &str = "ui/Icons_Only.png";
 const BLOOM_POOL_SIZE: f32 = 64.0;
 const BLOOM_HALO_EXTRA_SIZE: f32 = 28.0;
 const BLOOM_HALO_DURATION: f32 = 0.35;
@@ -70,6 +71,11 @@ const WORLD_CLICK_HALO_EXTRA_SIZE: f32 = 28.0;
 const WORLD_CLICK_HALO_PADDING: f32 = 12.0;
 const WORLD_CLICK_HALO_DEPTH_OFFSET: f32 = 0.001;
 const WORLD_ENTITY_ALPHA_THRESHOLD: f32 = 0.1;
+const TIME_CONTROL_BUTTON_SIZE: f32 = 28.0;
+const TIME_CONTROL_BUTTON_GAP: f32 = 10.0;
+const TIME_CONTROL_BUTTON_BOTTOM: f32 = 2.0;
+const TIME_CONTROL_PLAY_SPEED: f32 = 1.0;
+const TIME_CONTROL_FAST_SPEED: f32 = 2.0;
 
 // Camera zoom configuration
 const ZOOM_MIN: f32 = 0.5; // Max zoom in (smaller = more zoomed in)
@@ -122,6 +128,15 @@ fn load_stylized_ui_texture(assets: &AssetServer) -> Handle<Image> {
     )
 }
 
+fn load_icons_ui_texture(assets: &AssetServer) -> Handle<Image> {
+    assets.load_with_settings(
+        ICONS_UI_TEXTURE_PATH,
+        |settings: &mut ImageLoaderSettings| {
+            settings.sampler = ImageSampler::nearest();
+        },
+    )
+}
+
 fn main_menu_button_clicked_rect() -> Rect {
     Rect::new(65.0, 17.0, 111.0, 31.0)
 }
@@ -159,6 +174,18 @@ fn circular_pool_fill_rects() -> [Rect; 14] {
     })
 }
 
+fn time_control_fast_forward_rect() -> Rect {
+    Rect::new(16.0, 304.0, 24.0, 312.0)
+}
+
+fn time_control_play_rect() -> Rect {
+    Rect::new(32.0, 304.0, 40.0, 312.0)
+}
+
+fn time_control_pause_rect() -> Rect {
+    Rect::new(64.0, 304.0, 72.0, 312.0)
+}
+
 // UI marker components
 #[derive(Component)]
 struct GuardianSubmenu;
@@ -190,12 +217,37 @@ struct BloomHaloPulse {
 }
 
 #[derive(Component)]
+struct TimeControlButton {
+    mode: SimulationControl,
+}
+
+#[derive(Component)]
 struct WorldClickHalo;
 
 #[derive(Component)]
 struct WorldClickHaloPulse {
     timer: Timer,
     base_diameter: f32,
+}
+
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+struct SimulationControlState {
+    active: SimulationControl,
+}
+
+impl Default for SimulationControlState {
+    fn default() -> Self {
+        Self {
+            active: SimulationControl::Play,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SimulationControl {
+    Pause,
+    Play,
+    FastForward,
 }
 
 // Entity type identifier for buttons
@@ -872,6 +924,7 @@ fn main() {
         .init_resource::<SaveNotification>()
         .init_resource::<Bloom>()
         .init_resource::<BloomSelection>()
+        .init_resource::<SimulationControlState>()
         .init_resource::<DraftBoard>()
         .init_resource::<DraftDragState>()
         .init_resource::<SaveGameState>()
@@ -956,6 +1009,7 @@ fn main() {
                 sync_escape_menu_visibility,
                 update_bloom_pool,
                 update_bloom_selection_halo,
+                update_time_control_button_visuals,
                 animate_bloom_halo,
                 animate_world_click_halo,
                 pulse_bloom_halo_on_world_click,
@@ -3811,8 +3865,16 @@ fn setup_ui(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
+    mut time_control_state: ResMut<SimulationControlState>,
+    mut virtual_time: ResMut<Time<Virtual>>,
 ) {
     let stylized_ui_texture = load_stylized_ui_texture(&assets);
+    let icons_ui_texture = load_icons_ui_texture(&assets);
+    apply_simulation_control(
+        &mut virtual_time,
+        &mut time_control_state,
+        SimulationControl::Play,
+    );
 
     // Root UI container on the left side
     commands
@@ -4224,7 +4286,7 @@ fn setup_ui(
                 position_type: PositionType::Absolute,
                 left: Val::Px(0.0),
                 right: Val::Px(0.0),
-                bottom: Val::Px(24.0),
+                bottom: Val::Px(32.0),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()
@@ -4307,6 +4369,66 @@ fn setup_ui(
                         },
                     ));
                 });
+        });
+
+    commands
+        .spawn((
+            InGameUiRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                right: Val::Px(0.0),
+                bottom: Val::Px(TIME_CONTROL_BUTTON_BOTTOM),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(TIME_CONTROL_BUTTON_GAP),
+                ..default()
+            },
+            GlobalZIndex(10),
+        ))
+        .with_children(|parent| {
+            for (mode, icon_rect) in [
+                (SimulationControl::Pause, time_control_pause_rect()),
+                (SimulationControl::Play, time_control_play_rect()),
+                (
+                    SimulationControl::FastForward,
+                    time_control_fast_forward_rect(),
+                ),
+            ] {
+                parent
+                    .spawn((
+                        Button,
+                        TimeControlButton { mode },
+                        Node {
+                            width: Val::Px(TIME_CONTROL_BUTTON_SIZE),
+                            height: Val::Px(TIME_CONTROL_BUTTON_SIZE),
+                            padding: UiRect::all(Val::Px(2.0)),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            border: UiRect::all(Val::Px(1.0)),
+                            border_radius: BorderRadius::all(Val::Px(6.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.08, 0.1, 0.12, 0.9)),
+                        BorderColor::all(Color::srgba(0.72, 0.8, 0.76, 0.22)),
+                    ))
+                    .observe(handle_time_control_button_click)
+                    .with_children(|button| {
+                        button.spawn((
+                            ImageNode {
+                                image: icons_ui_texture.clone(),
+                                rect: Some(icon_rect),
+                                image_mode: NodeImageMode::Stretch,
+                                ..default()
+                            },
+                            Node {
+                                width: Val::Px(TIME_CONTROL_BUTTON_SIZE - 8.0),
+                                height: Val::Px(TIME_CONTROL_BUTTON_SIZE - 8.0),
+                                ..default()
+                            },
+                        ));
+                    });
+            }
         });
 
     let ui_texture = load_main_menu_ui_texture(&assets);
@@ -4459,6 +4581,68 @@ fn handle_bloom_pool_click(
             pulse.timer.reset();
             pulse.timer.unpause();
             break;
+        }
+    }
+}
+
+fn apply_simulation_control(
+    virtual_time: &mut Time<Virtual>,
+    state: &mut SimulationControlState,
+    mode: SimulationControl,
+) {
+    match mode {
+        SimulationControl::Pause => {
+            virtual_time.set_relative_speed(TIME_CONTROL_PLAY_SPEED);
+            virtual_time.pause();
+        }
+        SimulationControl::Play => {
+            virtual_time.set_relative_speed(TIME_CONTROL_PLAY_SPEED);
+            virtual_time.unpause();
+        }
+        SimulationControl::FastForward => {
+            virtual_time.set_relative_speed(TIME_CONTROL_FAST_SPEED);
+            virtual_time.unpause();
+        }
+    }
+
+    state.active = mode;
+}
+
+fn handle_time_control_button_click(
+    trigger: On<Pointer<Click>>,
+    button_query: Query<&TimeControlButton>,
+    mut state: ResMut<SimulationControlState>,
+    mut virtual_time: ResMut<Time<Virtual>>,
+) {
+    if trigger.event().button != PointerButton::Primary {
+        return;
+    }
+
+    let Ok(button) = button_query.get(trigger.entity) else {
+        return;
+    };
+
+    apply_simulation_control(&mut virtual_time, &mut state, button.mode);
+}
+
+fn update_time_control_button_visuals(
+    state: Res<SimulationControlState>,
+    mut buttons: Query<
+        (&TimeControlButton, &mut BackgroundColor, &mut BorderColor),
+        With<TimeControlButton>,
+    >,
+) {
+    if !state.is_changed() {
+        return;
+    }
+
+    for (button, mut background, mut border) in &mut buttons {
+        if button.mode == state.active {
+            *background = BackgroundColor(Color::srgba(0.22, 0.17, 0.06, 0.94));
+            *border = BorderColor::all(Color::srgb(0.94, 0.82, 0.36));
+        } else {
+            *background = BackgroundColor(Color::srgba(0.08, 0.1, 0.12, 0.9));
+            *border = BorderColor::all(Color::srgba(0.72, 0.8, 0.76, 0.22));
         }
     }
 }
