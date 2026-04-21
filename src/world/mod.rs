@@ -4,8 +4,12 @@ pub mod loader;
 pub mod manager;
 pub mod savegame;
 pub mod serialization;
+pub mod transitions;
 
 // Re-export commonly used items
 pub use generator::{generate_chunk, pregenerate_world_chunks};
 pub use manager::{TileModification, WorldManager, WorldStats};
 pub use savegame::{WorldElement, WorldGenerationConfig, WorldShape};
+pub use transitions::{
+    derive_stamp_set, StampKind, TerrainTransitionConfig, TerrainTransitionDescriptor,
+};

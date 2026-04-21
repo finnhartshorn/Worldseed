@@ -2,7 +2,6 @@ use super::{MapContent, MapModal, MapState};
 use bevy::prelude::*;
 
 pub fn reset_map_state(mut map_state: ResMut<MapState>) {
-    map_state.visible = false;
     map_state.active_sample_size_index = MapState::default().active_sample_size_index;
 }
 

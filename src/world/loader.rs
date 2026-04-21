@@ -1,11 +1,15 @@
-use super::{manager::WorldManager, savegame::WorldShape, serialization};
+use super::{
+    manager::WorldManager,
+    serialization,
+    transitions::{self, TerrainTransitionConfig},
+};
 use crate::tiles::{
     chunk::coords, Chunk, ChunkData, ChunkPos, DirtyChunk, CHUNK_LOAD_RADIUS, TILE_DISPLAY_SIZE,
 };
 use bevy::prelude::*;
 use bevy::sprite_render::{TileData, TilemapChunk, TilemapChunkTileData};
 use bevy::{
-    image::{ImageArrayLayout, ImageLoaderSettings},
+    image::{Image, ImageArrayLayout, ImageLoaderSettings},
     prelude::On,
 };
 #[cfg(feature = "debug_chunks")]
@@ -60,7 +64,9 @@ fn load_chunk_data_only(world: &mut WorldManager, chunk_pos: ChunkPos) -> ChunkD
 pub fn load_chunks_around_camera(
     mut commands: Commands,
     mut world: ResMut<WorldManager>,
+    mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
+    mut transition_config: Option<ResMut<TerrainTransitionConfig>>,
     camera_query: Query<(&Transform, &Projection), With<Camera2d>>,
     window_query: Query<&Window>,
 ) {
@@ -75,12 +81,33 @@ pub fn load_chunks_around_camera(
     let chunks_to_load = camera_chunk.chunks_in_radius(load_radius);
     #[cfg(feature = "debug_chunks")]
     let has_loaded_chunks = !chunks_to_load.is_empty();
-    let tileset = asset_server.load_with_settings(
-        "tilesets/terrain_array.png",
-        |settings: &mut ImageLoaderSettings| {
-            settings.array_layout = Some(ImageArrayLayout::RowCount { rows: 2 });
-        },
-    );
+    let tileset = if let Some(config) = transition_config.as_deref_mut() {
+        if config.enabled {
+            transitions::ensure_runtime_tileset(config, &mut images).unwrap_or_else(|error| {
+                error!("Failed to build transition tileset: {}", error);
+                asset_server.load_with_settings(
+                    "tilesets/terrain_array.png",
+                    |settings: &mut ImageLoaderSettings| {
+                        settings.array_layout = Some(ImageArrayLayout::RowCount { rows: 2 });
+                    },
+                )
+            })
+        } else {
+            asset_server.load_with_settings(
+                "tilesets/terrain_array.png",
+                |settings: &mut ImageLoaderSettings| {
+                    settings.array_layout = Some(ImageArrayLayout::RowCount { rows: 2 });
+                },
+            )
+        }
+    } else {
+        asset_server.load_with_settings(
+            "tilesets/terrain_array.png",
+            |settings: &mut ImageLoaderSettings| {
+                settings.array_layout = Some(ImageArrayLayout::RowCount { rows: 2 });
+            },
+        )
+    };
 
     for chunk_pos in chunks_to_load {
         // Skip if already loaded
@@ -89,7 +116,14 @@ pub fn load_chunks_around_camera(
         }
 
         // Load chunk data into cache (without spawning visual entities)
-        let chunk_data = load_chunk_data_only(&mut world, chunk_pos);
+        load_chunk_data_only(&mut world, chunk_pos);
+        if let Some(config) = transition_config.as_deref_mut() {
+            transitions::refresh_chunk_transitions(&mut world, config, &mut images, chunk_pos);
+        }
+        let chunk_data = world
+            .get_cached_chunk(&chunk_pos)
+            .cloned()
+            .expect("chunk should be cached before visual spawn");
 
         // Get world position for chunk
         let chunk_origin = chunk_pos.to_world(crate::tiles::CHUNK_PIXEL_SIZE);
@@ -273,13 +307,22 @@ pub fn log_world_stats(world: Res<WorldManager>) {
 }
 
 /// System to apply pending tile modifications to cache and trigger observers for visual updates
-pub fn apply_tile_modifications(mut world: ResMut<WorldManager>, mut commands: Commands) {
+pub fn apply_tile_modifications(
+    mut world: ResMut<WorldManager>,
+    mut commands: Commands,
+    mut transition_config: Option<ResMut<TerrainTransitionConfig>>,
+    mut images: ResMut<Assets<Image>>,
+) {
     use crate::tiles::chunk::coords;
+    use crate::tiles::LAYER_GROUND;
+    use std::collections::HashSet;
 
     let modifications = world.take_tile_modifications();
     if modifications.is_empty() {
         return;
     }
+
+    let mut changed_layers: HashSet<(ChunkPos, usize)> = HashSet::new();
 
     for modification in modifications {
         let world_pos = Vec2::new(modification.world_x, modification.world_y);
@@ -310,24 +353,41 @@ pub fn apply_tile_modifications(mut world: ResMut<WorldManager>, mut commands: C
             .get_mut(&chunk_pos)
             .expect("Chunk data should be in cache after load_chunk_data_only");
 
-        let (local_x, local_y) =
-            coords::world_to_local_tile(world_pos);
+        let (local_x, local_y) = coords::world_to_local_tile(world_pos);
 
         if chunk_data.set_tile(modification.layer, local_x, local_y, modification.tile_id) {
             // Mark chunk as dirty for later persistence
             world.mark_dirty(chunk_pos);
+            changed_layers.insert((chunk_pos, modification.layer));
 
-            // Trigger observer for visual update (observer will handle syncing to render layer)
-            commands.trigger(super::manager::ChunkDataChanged {
-                chunk_pos,
-                layer: modification.layer,
-            });
-
-            debug!(
-                "Triggered ChunkDataChanged observer for chunk {:?}, layer {}",
-                chunk_pos, modification.layer
-            );
+            if modification.layer == LAYER_GROUND {
+                if let Some(config) = transition_config.as_deref_mut() {
+                    if config.enabled {
+                        let edited_tile =
+                            transitions::world_to_tile(modification.world_x, modification.world_y);
+                        let changed_transition_chunks =
+                            transitions::refresh_transitions_around_ground_edit(
+                                &mut world,
+                                config,
+                                &mut images,
+                                edited_tile,
+                            );
+                        for changed_chunk in changed_transition_chunks {
+                            world.mark_dirty(changed_chunk);
+                            changed_layers.insert((changed_chunk, config.overlay_layer));
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    for (chunk_pos, layer) in changed_layers {
+        commands.trigger(super::manager::ChunkDataChanged { chunk_pos, layer });
+        debug!(
+            "Triggered ChunkDataChanged observer for chunk {:?}, layer {}",
+            chunk_pos, layer
+        );
     }
 }
 
@@ -590,7 +650,7 @@ pub fn update_tilemap(
 mod tests {
     use super::*;
     use crate::tiles::{LAYER_GROUND, TILE_EMPTY, TILE_GRASS};
-    use crate::world::savegame::{WorldElement, WorldGenerationConfig};
+    use crate::world::savegame::{WorldElement, WorldGenerationConfig, WorldShape};
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},

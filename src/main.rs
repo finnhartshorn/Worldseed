@@ -54,7 +54,7 @@ use world::{
     },
     loader, pregenerate_world_chunks,
     savegame::{self, SaveSlotMetadata, WorldMetadata},
-    WorldElement, WorldGenerationConfig, WorldManager, WorldShape,
+    TerrainTransitionConfig, WorldElement, WorldGenerationConfig, WorldManager, WorldShape,
 };
 
 // UI sprite vertical offsets for proper centering
@@ -230,24 +230,65 @@ struct WorldClickHaloPulse {
     base_diameter: f32,
 }
 
-#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
-struct SimulationControlState {
-    active: SimulationControl,
-}
-
-impl Default for SimulationControlState {
-    fn default() -> Self {
-        Self {
-            active: SimulationControl::Play,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SimulationControl {
     Pause,
     Play,
     FastForward,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UIMode {
+    None,
+    EscapeMenu,
+    Map,
+}
+
+impl Default for UIMode {
+    fn default() -> Self { UIMode::None }
+}
+
+#[derive(Resource, Clone, Copy, PartialEq, Eq)]
+struct GameUIState {
+    mode: UIMode,
+    simulation: SimulationControl,
+    debug_bounds_enabled: bool,
+    save_requested: bool,
+    reset_requested: bool,
+}
+
+impl Default for GameUIState {
+    fn default() -> Self {
+        Self {
+            mode: UIMode::None,
+            simulation: SimulationControl::Play,
+            debug_bounds_enabled: false,
+            save_requested: false,
+            reset_requested: false,
+        }
+    }
+}
+
+impl GameUIState {
+    fn is_escape_menu_open(&self) -> bool { self.mode == UIMode::EscapeMenu }
+    fn is_map_visible(&self) -> bool { self.mode == UIMode::Map }
+    fn open_escape_menu(&mut self) { self.mode = UIMode::EscapeMenu; }
+    fn close_escape_menu(&mut self) { self.mode = UIMode::None; }
+    fn close_all_modals(&mut self) { self.mode = UIMode::None; }
+    fn toggle_map(&mut self) {
+        self.mode = match self.mode {
+            UIMode::Map => UIMode::None,
+            _ => UIMode::Map,
+        };
+    }
+    fn request_save(&mut self) { self.save_requested = true; }
+    fn request_reset(&mut self) { self.reset_requested = true; }
+    fn take_save_request(&mut self) -> bool {
+        std::mem::replace(&mut self.save_requested, false)
+    }
+    fn take_reset_request(&mut self) -> bool {
+        std::mem::replace(&mut self.reset_requested, false)
+    }
 }
 
 // Entity type identifier for buttons
@@ -333,16 +374,6 @@ impl PaintDragState {
     fn reset(&mut self) {
         self.last_painted_tile = None;
     }
-}
-
-#[derive(Resource, Default, Clone, Debug)]
-struct SpriteBoundsDebug {
-    enabled: bool,
-}
-
-#[derive(Resource, Default, Clone, Debug)]
-struct EscapeMenuState {
-    open: bool,
 }
 
 // Save notification resource - tracks save notification display state
@@ -914,17 +945,16 @@ fn main() {
         .init_state::<AppState>()
         .add_plugins(MapPlugin)
         .init_resource::<WorldManager>()
+        .init_resource::<TerrainTransitionConfig>()
         .init_resource::<loader::ChunkSaveTimer>()
         .init_resource::<EntityAutosaveTimer>()
         .init_resource::<PlacementMode>()
         .init_resource::<PaintMode>()
         .init_resource::<PaintDragState>()
-        .init_resource::<SpriteBoundsDebug>()
-        .init_resource::<EscapeMenuState>()
+        .init_resource::<GameUIState>()
         .init_resource::<SaveNotification>()
         .init_resource::<Bloom>()
         .init_resource::<BloomSelection>()
-        .init_resource::<SimulationControlState>()
         .init_resource::<DraftBoard>()
         .init_resource::<DraftDragState>()
         .init_resource::<SaveGameState>()
@@ -1005,7 +1035,7 @@ fn main() {
             Update,
             (
                 update_main_menu_button_visuals,
-                toggle_escape_menu,
+                handle_keyboard_shortcuts,
                 sync_escape_menu_visibility,
                 update_bloom_pool,
                 update_bloom_selection_halo,
@@ -1058,19 +1088,18 @@ fn main() {
                 update_button_selection,
                 update_terrain_button_selection,
                 // Save notification
-                handle_manual_save,
+                handle_manual_save_requested,
                 update_save_notification,
-                toggle_sprite_bounds_debug,
                 // World management
+                handle_reset_requested,
                 loader::update_camera_chunk,
                 loader::load_chunks_around_camera.after(loader::update_camera_chunk),
                 loader::unload_distant_chunks.after(loader::load_chunks_around_camera),
                 loader::apply_tile_modifications,
+                world::transitions::log_transition_cache_pressure,
                 loader::autosave_dirty_chunks,
                 autosave_entities,
                 draw_snail_debug_bounds,
-                // Map reset
-                reset_world_map,
             )
                 .run_if(escape_menu_closed)
                 .run_if(in_state(AppState::InGame)),
@@ -1078,8 +1107,8 @@ fn main() {
         .run();
 }
 
-fn escape_menu_closed(menu_state: Res<EscapeMenuState>) -> bool {
-    !menu_state.open
+fn escape_menu_closed(ui_state: Res<GameUIState>) -> bool {
+    !ui_state.is_escape_menu_open()
 }
 
 fn formatted_timestamp(timestamp: u64) -> String {
@@ -1445,7 +1474,7 @@ fn handle_exit_world_button_interaction(
     >,
     mut save_state: ResMut<SaveGameState>,
     mut world_manager: ResMut<WorldManager>,
-    mut escape_menu_state: ResMut<EscapeMenuState>,
+    mut ui_state: ResMut<GameUIState>,
     camera_query: Query<(&Transform, &Projection), With<InGameCamera>>,
     bloom: Option<Res<Bloom>>,
     human_query: Query<
@@ -1501,7 +1530,7 @@ fn handle_exit_world_button_interaction(
                 );
                 save_state.active_world_id = None;
                 save_state.refresh_worlds();
-                escape_menu_state.open = false;
+                ui_state.close_escape_menu();
                 next_state.set(AppState::SlotHub);
             }
             Interaction::None => press_state.armed = false,
@@ -1517,7 +1546,7 @@ fn handle_exit_to_main_menu_button_interaction(
     >,
     mut save_state: ResMut<SaveGameState>,
     mut world_manager: ResMut<WorldManager>,
-    mut escape_menu_state: ResMut<EscapeMenuState>,
+    mut ui_state: ResMut<GameUIState>,
     camera_query: Query<(&Transform, &Projection), With<InGameCamera>>,
     bloom: Option<Res<Bloom>>,
     human_query: Query<
@@ -1575,7 +1604,7 @@ fn handle_exit_to_main_menu_button_interaction(
                 save_state.active_world_id = None;
                 save_state.refresh_slots();
                 save_state.refresh_worlds();
-                escape_menu_state.open = false;
+                ui_state.close_escape_menu();
                 next_state.set(AppState::MainMenu);
             }
             Interaction::None => press_state.armed = false,
@@ -3665,10 +3694,10 @@ fn setup_world(
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
     save_state: Res<SaveGameState>,
     mut world_manager: ResMut<WorldManager>,
-    mut escape_menu_state: ResMut<EscapeMenuState>,
+    mut ui_state: ResMut<GameUIState>,
     mut bloom: ResMut<Bloom>,
 ) {
-    escape_menu_state.open = false;
+    ui_state.close_escape_menu();
 
     if let (Some(slot_id), Some(world_id)) = (
         save_state.active_slot_id.as_deref(),
@@ -3793,10 +3822,10 @@ fn setup_world(
 fn zoom_camera(
     mut scroll_events: MessageReader<MouseWheel>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    map_state: Res<MapState>,
+    ui_state: Res<GameUIState>,
     mut camera_query: Query<&mut Projection, With<Camera2d>>,
 ) {
-    if map_state.visible {
+    if ui_state.is_map_visible() {
         return;
     }
 
@@ -3825,7 +3854,7 @@ fn zoom_camera(
 /// Moves camera with arrow keys. Speed scales with zoom level.
 fn move_camera(
     keyboard: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut camera_query: Query<(&mut Transform, &Projection), With<Camera2d>>,
 ) {
     let Ok((mut transform, projection)) = camera_query.single_mut() else {
@@ -3865,14 +3894,14 @@ fn setup_ui(
     mut commands: Commands,
     assets: Res<AssetServer>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
-    mut time_control_state: ResMut<SimulationControlState>,
+    mut ui_state: ResMut<GameUIState>,
     mut virtual_time: ResMut<Time<Virtual>>,
 ) {
     let stylized_ui_texture = load_stylized_ui_texture(&assets);
     let icons_ui_texture = load_icons_ui_texture(&assets);
     apply_simulation_control(
         &mut virtual_time,
-        &mut time_control_state,
+        &mut ui_state,
         SimulationControl::Play,
     );
 
@@ -4492,28 +4521,191 @@ fn setup_ui(
         });
 }
 
-fn toggle_escape_menu(
+fn handle_keyboard_shortcuts(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut escape_menu_state: ResMut<EscapeMenuState>,
-    mut map_state: ResMut<MapState>,
+    mut ui_state: ResMut<GameUIState>,
+    mut virtual_time: ResMut<Time<Virtual>>,
     mut map_modal_visibility: Single<&mut Visibility, With<MapModal>>,
 ) {
+    // Escape - Toggle escape menu (but close map first if open)
     if keyboard.just_pressed(KeyCode::Escape) {
-        if map_state.visible {
-            map_state.visible = false;
+        if ui_state.is_map_visible() {
+            ui_state.close_all_modals();
             **map_modal_visibility = Visibility::Hidden;
             return;
         }
 
-        escape_menu_state.open = !escape_menu_state.open;
+        if ui_state.is_escape_menu_open() {
+            ui_state.close_escape_menu();
+        } else {
+            ui_state.open_escape_menu();
+        }
+        return;
+    }
+
+    // S - Request manual save
+    if keyboard.just_pressed(KeyCode::KeyS) {
+        ui_state.request_save();
+        return;
+    }
+
+    // B - Toggle sprite bounds debug
+    if keyboard.just_pressed(KeyCode::KeyB) {
+        ui_state.debug_bounds_enabled = !ui_state.debug_bounds_enabled;
+        info!(
+            "Sprite bounds debug {}",
+            if ui_state.debug_bounds_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        return;
+    }
+
+    // R - Request reset world map
+    if keyboard.just_pressed(KeyCode::KeyR) {
+        ui_state.request_reset();
+        return;
+    }
+
+    // M - Toggle minimap
+    if keyboard.just_pressed(KeyCode::KeyM) {
+        ui_state.toggle_map();
+        **map_modal_visibility = if ui_state.is_map_visible() {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        return;
+    }
+
+    // Space - Toggle pause/play
+    if keyboard.just_pressed(KeyCode::Space) {
+        let new_mode = match ui_state.simulation {
+            SimulationControl::Pause => SimulationControl::Play,
+            SimulationControl::Play | SimulationControl::FastForward => SimulationControl::Pause,
+        };
+        apply_simulation_control(&mut virtual_time, &mut ui_state, new_mode);
+        return;
     }
 }
 
+fn handle_manual_save_requested(
+    mut ui_state: ResMut<GameUIState>,
+    mut save_notification: ResMut<SaveNotification>,
+    mut world: ResMut<WorldManager>,
+    camera_query: Query<(&Transform, &Projection), With<InGameCamera>>,
+    bloom: Res<Bloom>,
+    human_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+        ),
+        With<Human>,
+    >,
+    guardian_query: Query<(
+        &Position,
+        &Velocity,
+        &Direction,
+        &entities::EntityState,
+        &Health,
+        &ForestGuardian,
+        &RoamingBehavior,
+        &TreeSpawner,
+    )>,
+    snail_query: Query<
+        (
+            &Position,
+            &Velocity,
+            &Direction,
+            &entities::EntityState,
+            &Health,
+            &WindingPath,
+        ),
+        With<Snail>,
+    >,
+    tree_spirit_query: Query<(&Position, &GrowingTree), With<TreeSpirit>>,
+    variant_tree_query: Query<(&Position, &GrowingTree), With<VariantTree>>,
+) {
+    if !ui_state.take_save_request() {
+        return;
+    }
+
+    info!("Manual save requested");
+    save_world_snapshot(
+        &mut world,
+        &camera_query,
+        Some(&bloom),
+        &human_query,
+        &guardian_query,
+        &snail_query,
+        &tree_spirit_query,
+        &variant_tree_query,
+        Some(&mut save_notification),
+    );
+}
+
+fn handle_reset_requested(
+    mut ui_state: ResMut<GameUIState>,
+    mut world_manager: ResMut<WorldManager>,
+    mut save_state: ResMut<SaveGameState>,
+    mut camera_query: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
+    chunk_entities: Query<Entity, With<TilemapChunk>>,
+    mut commands: Commands,
+) {
+    if !ui_state.take_reset_request() {
+        return;
+    }
+
+    info!("Resetting world map...");
+
+    // 1. Despawn all active chunk entities (all 3 layers)
+    for entity in chunk_entities.iter() {
+        commands.entity(entity).despawn();
+    }
+
+    // 2. Clear WorldManager state
+    world_manager.active_chunks.clear();
+    world_manager.dirty_chunks.clear();
+    world_manager.chunk_cache.clear();
+    world_manager.pending_tile_modifications.clear();
+    world_manager.camera_chunk = None;
+    world_manager.generation = WorldGenerationConfig::default();
+
+    // 3. Delete the active world directory from disk
+    let save_dir = &world_manager.save_directory;
+    if save_dir.exists() {
+        if let Err(e) = fs::remove_dir_all(save_dir) {
+            warn!("Failed to delete save directory: {}", e);
+        } else {
+            info!("Deleted save directory: {:?}", save_dir);
+        }
+    }
+
+    save_state.active_world_id = None;
+    save_state.refresh_worlds();
+
+    // 4. Reset camera to origin and zoom to default (1.0)
+    if let Ok((mut transform, mut projection)) = camera_query.single_mut() {
+        transform.translation.x = 0.0;
+        transform.translation.y = 0.0;
+        if let Projection::Orthographic(ref mut ortho) = projection.as_mut() {
+            ortho.scale = 1.0;
+        }
+    }
+
+    info!("World map reset complete");
+}
+
 fn sync_escape_menu_visibility(
-    escape_menu_state: Res<EscapeMenuState>,
+    ui_state: Res<GameUIState>,
     mut menu_query: Query<&mut Node, With<EscapeMenuRoot>>,
 ) {
-    if !escape_menu_state.is_changed() {
+    if !ui_state.is_changed() {
         return;
     }
 
@@ -4521,7 +4713,7 @@ fn sync_escape_menu_visibility(
         return;
     };
 
-    node.display = if escape_menu_state.open {
+    node.display = if ui_state.is_escape_menu_open() {
         Display::Flex
     } else {
         Display::None
@@ -4587,7 +4779,7 @@ fn handle_bloom_pool_click(
 
 fn apply_simulation_control(
     virtual_time: &mut Time<Virtual>,
-    state: &mut SimulationControlState,
+    ui_state: &mut GameUIState,
     mode: SimulationControl,
 ) {
     match mode {
@@ -4605,13 +4797,13 @@ fn apply_simulation_control(
         }
     }
 
-    state.active = mode;
+    ui_state.simulation = mode;
 }
 
 fn handle_time_control_button_click(
     trigger: On<Pointer<Click>>,
     button_query: Query<&TimeControlButton>,
-    mut state: ResMut<SimulationControlState>,
+    mut ui_state: ResMut<GameUIState>,
     mut virtual_time: ResMut<Time<Virtual>>,
 ) {
     if trigger.event().button != PointerButton::Primary {
@@ -4622,22 +4814,22 @@ fn handle_time_control_button_click(
         return;
     };
 
-    apply_simulation_control(&mut virtual_time, &mut state, button.mode);
+    apply_simulation_control(&mut virtual_time, &mut ui_state, button.mode);
 }
 
 fn update_time_control_button_visuals(
-    state: Res<SimulationControlState>,
+    ui_state: Res<GameUIState>,
     mut buttons: Query<
         (&TimeControlButton, &mut BackgroundColor, &mut BorderColor),
         With<TimeControlButton>,
     >,
 ) {
-    if !state.is_changed() {
+    if !ui_state.is_changed() {
         return;
     }
 
     for (button, mut background, mut border) in &mut buttons {
-        if button.mode == state.active {
+        if button.mode == ui_state.simulation {
             *background = BackgroundColor(Color::srgba(0.22, 0.17, 0.06, 0.94));
             *border = BorderColor::all(Color::srgb(0.94, 0.82, 0.36));
         } else {
@@ -5749,9 +5941,9 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<EscapeMenuState>()
+            .init_resource::<GameUIState>()
             .init_resource::<MapState>()
-            .add_systems(Update, toggle_escape_menu);
+            .add_systems(Update, handle_keyboard_shortcuts);
         app.world_mut().spawn((MapModal, Visibility::Hidden));
 
         app.world_mut()
@@ -5759,7 +5951,7 @@ mod tests {
             .press(KeyCode::Escape);
         app.update();
 
-        assert!(app.world().resource::<EscapeMenuState>().open);
+        assert!(app.world().resource::<GameUIState>().is_escape_menu_open());
     }
 
     #[test]
@@ -5767,20 +5959,22 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<EscapeMenuState>()
+            .init_resource::<GameUIState>()
             .init_resource::<MapState>()
-            .add_systems(Update, toggle_escape_menu);
+            .add_systems(Update, handle_keyboard_shortcuts);
 
         app.world_mut().spawn((MapModal, Visibility::Visible));
-        app.world_mut().resource_mut::<MapState>().visible = true;
+        let mut ui_state = app.world_mut().resource_mut::<GameUIState>();
+        ui_state.toggle_map();
+        drop(ui_state);
 
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::Escape);
         app.update();
 
-        assert!(!app.world().resource::<MapState>().visible);
-        assert!(!app.world().resource::<EscapeMenuState>().open);
+        assert!(!app.world().resource::<GameUIState>().is_map_visible());
+        assert!(!app.world().resource::<GameUIState>().is_escape_menu_open());
 
         let visibility = {
             let world = app.world_mut();
@@ -5805,7 +5999,7 @@ mod tests {
             .init_resource::<PlacementMode>()
             .init_resource::<PaintMode>()
             .init_resource::<PaintDragState>()
-            .init_resource::<EscapeMenuState>()
+            .init_resource::<GameUIState>()
             .add_systems(OnExit(AppState::InGame), cleanup_in_game)
             .add_systems(Update, handle_exit_world_button_interaction);
 
@@ -5819,7 +6013,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<WorldManager>()
             .save_directory = temp_root.join("world");
-        app.world_mut().resource_mut::<EscapeMenuState>().open = true;
+        app.world_mut().resource_mut::<GameUIState>().open_escape_menu();
         app.world_mut().spawn((InGameCamera, Camera2d));
         app.world_mut().spawn(InGameUiRoot);
         app.world_mut()
@@ -5865,7 +6059,7 @@ mod tests {
             app.world().resource::<SaveGameState>().active_world_id,
             None
         );
-        assert!(!app.world().resource::<EscapeMenuState>().open);
+        assert!(!app.world().resource::<GameUIState>().is_escape_menu_open());
 
         let camera_count = {
             let world = app.world_mut();
@@ -5967,7 +6161,7 @@ fn cleanup_in_game(
         ResMut<PaintMode>,
         ResMut<PaintDragState>,
         ResMut<SaveNotification>,
-        ResMut<EscapeMenuState>,
+        ResMut<GameUIState>,
     ),
 ) {
     let (
@@ -5975,7 +6169,7 @@ fn cleanup_in_game(
         mut paint_mode,
         mut paint_drag_state,
         mut save_notification,
-        mut escape_menu_state,
+        mut game_ui_state,
     ) = ui_state;
 
     if let Some((_, transform, projection)) = in_game_cameras.iter().next() {
@@ -6032,7 +6226,7 @@ fn cleanup_in_game(
     paint_mode.deselect();
     paint_drag_state.reset();
     save_notification.visible = false;
-    escape_menu_state.open = false;
+    game_ui_state.close_escape_menu();
 }
 
 fn save_dirty_chunks(world: &mut WorldManager) {
@@ -6213,66 +6407,6 @@ fn save_world_entities_only(
     }
 }
 
-/// System to handle 's' key press and trigger manual save
-fn handle_manual_save(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut save_notification: ResMut<SaveNotification>,
-    mut world: ResMut<WorldManager>,
-    camera_query: Query<(&Transform, &Projection), With<InGameCamera>>,
-    bloom: Res<Bloom>,
-    human_query: Query<
-        (
-            &Position,
-            &Velocity,
-            &Direction,
-            &entities::EntityState,
-            &Health,
-        ),
-        With<Human>,
-    >,
-    guardian_query: Query<(
-        &Position,
-        &Velocity,
-        &Direction,
-        &entities::EntityState,
-        &Health,
-        &ForestGuardian,
-        &RoamingBehavior,
-        &TreeSpawner,
-    )>,
-    snail_query: Query<
-        (
-            &Position,
-            &Velocity,
-            &Direction,
-            &entities::EntityState,
-            &Health,
-            &WindingPath,
-        ),
-        With<Snail>,
-    >,
-    tree_spirit_query: Query<(&Position, &GrowingTree), With<TreeSpirit>>,
-    variant_tree_query: Query<(&Position, &GrowingTree), With<VariantTree>>,
-) {
-    // Only trigger on 's' key press
-    if !keyboard.just_pressed(KeyCode::KeyS) {
-        return;
-    }
-
-    info!("Manual save requested");
-    save_world_snapshot(
-        &mut world,
-        &camera_query,
-        Some(&bloom),
-        &human_query,
-        &guardian_query,
-        &snail_query,
-        &tree_spirit_query,
-        &variant_tree_query,
-        Some(&mut save_notification),
-    );
-}
-
 fn autosave_entities(
     time: Res<Time>,
     mut timer: ResMut<EntityAutosaveTimer>,
@@ -6352,26 +6486,9 @@ fn update_save_notification(
     }
 }
 
-fn toggle_sprite_bounds_debug(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut sprite_bounds_debug: ResMut<SpriteBoundsDebug>,
-) {
-    if keyboard.just_pressed(KeyCode::KeyB) {
-        sprite_bounds_debug.enabled = !sprite_bounds_debug.enabled;
-        info!(
-            "Sprite bounds debug {}",
-            if sprite_bounds_debug.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        );
-    }
-}
-
 fn draw_snail_debug_bounds(
     mut gizmos: Gizmos,
-    sprite_bounds_debug: Res<SpriteBoundsDebug>,
+    ui_state: Res<GameUIState>,
     images: Res<Assets<Image>>,
     texture_atlas_layouts: Res<Assets<TextureAtlasLayout>>,
     sprite_query: Query<
@@ -6386,7 +6503,7 @@ fn draw_snail_debug_bounds(
         With<WorldRenderDepth>,
     >,
 ) {
-    if !sprite_bounds_debug.enabled {
+    if !ui_state.debug_bounds_enabled {
         return;
     }
 
@@ -6486,58 +6603,4 @@ fn sprite_world_bounds(
     let anchor = anchor.unwrap_or_default();
     let center = transform.translation.truncate() - anchor.as_vec() * world_size;
     Some((center, world_size))
-}
-
-/// System to reset the world map when 'R' key is pressed
-fn reset_world_map(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut world_manager: ResMut<WorldManager>,
-    mut save_state: ResMut<SaveGameState>,
-    mut camera_query: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
-    chunk_entities: Query<Entity, With<TilemapChunk>>,
-    mut commands: Commands,
-) {
-    // Only trigger on R key press
-    if !keyboard.just_pressed(KeyCode::KeyR) {
-        return;
-    }
-
-    info!("Resetting world map...");
-
-    // 1. Despawn all active chunk entities (all 3 layers)
-    for entity in chunk_entities.iter() {
-        commands.entity(entity).despawn();
-    }
-
-    // 2. Clear WorldManager state
-    world_manager.active_chunks.clear();
-    world_manager.dirty_chunks.clear();
-    world_manager.chunk_cache.clear();
-    world_manager.pending_tile_modifications.clear();
-    world_manager.camera_chunk = None;
-    world_manager.generation = WorldGenerationConfig::default();
-
-    // 3. Delete the active world directory from disk
-    let save_dir = &world_manager.save_directory;
-    if save_dir.exists() {
-        if let Err(e) = fs::remove_dir_all(save_dir) {
-            warn!("Failed to delete save directory: {}", e);
-        } else {
-            info!("Deleted save directory: {:?}", save_dir);
-        }
-    }
-
-    save_state.active_world_id = None;
-    save_state.refresh_worlds();
-
-    // 4. Reset camera to origin and zoom to default (1.0)
-    if let Ok((mut transform, mut projection)) = camera_query.single_mut() {
-        transform.translation.x = 0.0;
-        transform.translation.y = 0.0;
-        if let Projection::Orthographic(ref mut ortho) = projection.as_mut() {
-            ortho.scale = 1.0;
-        }
-    }
-
-    info!("World map reset complete");
 }

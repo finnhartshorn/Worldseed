@@ -1,5 +1,5 @@
 use super::{
-    MapConfig, MapContent, MapDynamicContent, MapModal, MapState, MINIMAP_DIRT_COLOR,
+    MapConfig, MapContent, MapDynamicContent, MapState, MINIMAP_DIRT_COLOR,
     MINIMAP_EMPTY_COLOR, MINIMAP_GRASS_COLOR, MINIMAP_MAX_DISPLAY_HEIGHT_RATIO,
     MINIMAP_MAX_DISPLAY_WIDTH_RATIO, MINIMAP_MAX_PIXEL_SIZE, MINIMAP_UNKNOWN_COLOR,
 };
@@ -7,33 +7,18 @@ use crate::tiles::{
     ChunkPos, TileId, CHUNK_SIZE_I32, LAYER_GROUND, TILE_DIRT, TILE_EMPTY, TILE_GRASS,
 };
 use crate::world::WorldManager;
+use crate::GameUIState;
 use bevy::input::keyboard::KeyCode;
 use bevy::prelude::*;
-
-/// Toggles map visibility when 'M' key is pressed.
-pub fn toggle_map_visibility(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut map_state: ResMut<MapState>,
-    mut modal_query: Single<&mut Visibility, With<MapModal>>,
-) {
-    if keyboard.just_pressed(KeyCode::KeyM) {
-        map_state.visible = !map_state.visible;
-
-        **modal_query = if map_state.visible {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-    }
-}
 
 /// Cycles the minimap sample size while the modal is open.
 pub fn cycle_map_resolution(
     keyboard: Res<ButtonInput<KeyCode>>,
+    ui_state: Res<GameUIState>,
     map_config: Res<MapConfig>,
     mut map_state: ResMut<MapState>,
 ) {
-    if !map_state.visible || map_config.sample_sizes_in_tiles.is_empty() {
+    if !ui_state.is_map_visible() || map_config.sample_sizes_in_tiles.is_empty() {
         return;
     }
 
@@ -55,6 +40,7 @@ pub struct MapTile;
 /// Updates the minimap display from loaded chunk data.
 pub fn update_map_display(
     mut commands: Commands,
+    ui_state: Res<GameUIState>,
     map_state: Res<MapState>,
     map_config: Res<MapConfig>,
     world_manager: Res<WorldManager>,
@@ -62,7 +48,7 @@ pub fn update_map_display(
     existing_dynamic_content: Query<Entity, With<MapDynamicContent>>,
     primary_window: Single<&Window>,
 ) {
-    if !map_state.visible {
+    if !ui_state.is_map_visible() {
         return;
     }
 

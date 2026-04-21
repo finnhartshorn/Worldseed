@@ -152,7 +152,9 @@ impl WorldManager {
                     );
                     match self.generation.shape {
                         WorldShape::Island => ChunkData::empty(chunk_pos),
-                        WorldShape::Infinity => generator::generate_chunk(chunk_pos, self.generation),
+                        WorldShape::Infinity => {
+                            generator::generate_chunk(chunk_pos, self.generation)
+                        }
                     }
                 }
             }
@@ -176,7 +178,9 @@ impl WorldManager {
         };
 
         let (local_x, local_y) = coords::world_to_local_tile(world_pos);
-        chunk.get_tile(LAYER_GROUND, local_x, local_y).unwrap_or(TILE_EMPTY)
+        chunk
+            .get_tile(LAYER_GROUND, local_x, local_y)
+            .unwrap_or(TILE_EMPTY)
     }
 
     /// Void is represented by an empty ground tile. Land checks should go through this helper.

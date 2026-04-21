@@ -21,7 +21,6 @@ impl Plugin for MapPlugin {
             .add_systems(
                 Update,
                 (
-                    toggle_map_visibility,
                     cycle_map_resolution,
                     update_map_display,
                 )
@@ -47,16 +46,14 @@ impl Default for MapConfig {
 }
 
 /// Current state of the map modal.
-#[derive(Resource)]
+#[derive(Resource, Clone, Debug)]
 pub struct MapState {
-    pub visible: bool,
     pub active_sample_size_index: usize,
 }
 
 impl Default for MapState {
     fn default() -> Self {
         Self {
-            visible: false,
             active_sample_size_index: 1,
         }
     }
